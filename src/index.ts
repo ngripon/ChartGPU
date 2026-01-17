@@ -35,6 +35,8 @@ export type {
 
 // Themes
 export type { ThemeConfig } from './themes/types';
+export { darkTheme, lightTheme, getTheme } from './themes';
+export type { ThemeName } from './themes';
 
 // Scales - Pure utilities
 export { createLinearScale } from './utils/scales';

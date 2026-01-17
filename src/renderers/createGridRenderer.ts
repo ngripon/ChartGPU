@@ -1,8 +1,16 @@
 import gridWgsl from '../shaders/grid.wgsl?raw';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { parseCssColorToRgba01 } from '../utils/colors';
 
 export interface GridRenderer {
-  prepare(gridArea: GridArea, lineCount?: GridLineCount): void;
+  /**
+   * Backward compatible:
+   * - `prepare(gridArea, lineCount)` where `lineCount` is `{ horizontal?, vertical? }`
+   *
+   * Preferred:
+   * - `prepare(gridArea, { lineCount, color })`
+   */
+  prepare(gridArea: GridArea, lineCountOrOptions?: GridLineCount | GridPrepareOptions): void;
   render(passEncoder: GPURenderPassEncoder): void;
   dispose(): void;
 }
@@ -21,6 +29,16 @@ export interface GridLineCount {
   readonly vertical?: number;    // Default: 6
 }
 
+export interface GridPrepareOptions {
+  readonly lineCount?: GridLineCount;
+  /**
+   * CSS color string used for grid lines.
+   *
+   * Expected formats: `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(r,g,b)`, `rgba(r,g,b,a)`.
+   */
+  readonly color?: string;
+}
+
 export interface GridRendererOptions {
   /**
    * Must match the canvas context format used for the render pass color attachment.
@@ -34,6 +52,8 @@ export interface GridRendererOptions {
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_HORIZONTAL_LINES = 5;
 const DEFAULT_VERTICAL_LINES = 6;
+const DEFAULT_GRID_COLOR = 'rgba(255,255,255,0.15)';
+const DEFAULT_GRID_RGBA: readonly [number, number, number, number] = [1, 1, 1, 0.15];
 
 const createIdentityMat4Buffer = (): ArrayBuffer => {
   // Column-major identity mat4x4
@@ -168,11 +188,25 @@ export function createGridRenderer(device: GPUDevice, options?: GridRendererOpti
     if (disposed) throw new Error('GridRenderer is disposed.');
   };
 
-  const prepare: GridRenderer['prepare'] = (gridArea, lineCount) => {
+  const prepare: GridRenderer['prepare'] = (gridArea, lineCountOrOptions) => {
     assertNotDisposed();
+
+    const isOptionsObject =
+      lineCountOrOptions != null &&
+      typeof lineCountOrOptions === 'object' &&
+      ('lineCount' in lineCountOrOptions || 'color' in lineCountOrOptions);
+
+    const options: GridPrepareOptions | undefined = isOptionsObject
+      ? (lineCountOrOptions as GridPrepareOptions)
+      : undefined;
+
+    const lineCount: GridLineCount | undefined = isOptionsObject
+      ? options?.lineCount
+      : (lineCountOrOptions as GridLineCount | undefined);
 
     const horizontal = lineCount?.horizontal ?? DEFAULT_HORIZONTAL_LINES;
     const vertical = lineCount?.vertical ?? DEFAULT_VERTICAL_LINES;
+    const colorString = options?.color ?? DEFAULT_GRID_COLOR;
 
     // Validate inputs
     if (horizontal < 0 || vertical < 0) {
@@ -231,9 +265,10 @@ export function createGridRenderer(device: GPUDevice, options?: GridRendererOpti
     const transformBuffer = createIdentityMat4Buffer();
     writeUniformBuffer(device, vsUniformBuffer, transformBuffer);
 
-    // FS uniform: white at 15% opacity
+    // FS uniform: theme-driven (grid lines)
+    const rgba = parseCssColorToRgba01(colorString) ?? DEFAULT_GRID_RGBA;
     const colorBuffer = new ArrayBuffer(4 * 4);
-    new Float32Array(colorBuffer).set([1.0, 1.0, 1.0, 0.15]);
+    new Float32Array(colorBuffer).set([rgba[0], rgba[1], rgba[2], rgba[3]]);
     writeUniformBuffer(device, fsUniformBuffer, colorBuffer);
   };
 

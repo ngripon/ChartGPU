@@ -3,9 +3,17 @@ import type { AxisConfig } from '../config/types';
 import type { LinearScale } from '../utils/scales';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
 import type { GridArea } from './createGridRenderer';
+import { parseCssColorToRgba01 } from '../utils/colors';
 
 export interface AxisRenderer {
-  prepare(axisConfig: AxisConfig, scale: LinearScale, orientation: 'x' | 'y', gridArea: GridArea): void;
+  prepare(
+    axisConfig: AxisConfig,
+    scale: LinearScale,
+    orientation: 'x' | 'y',
+    gridArea: GridArea,
+    axisLineColor?: string,
+    axisTickColor?: string
+  ): void;
   render(passEncoder: GPURenderPassEncoder): void;
   dispose(): void;
 }
@@ -23,6 +31,7 @@ export interface AxisRendererOptions {
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_TICK_COUNT = 5;
 const DEFAULT_TICK_LENGTH_CSS_PX = 6;
+const DEFAULT_AXIS_RGBA: readonly [number, number, number, number] = [1, 1, 1, 0.8];
 
 const createIdentityMat4Buffer = (): ArrayBuffer => {
   // Column-major identity mat4x4
@@ -154,13 +163,22 @@ export function createAxisRenderer(device: GPUDevice, options?: AxisRendererOpti
   });
 
   const vsUniformBuffer = createUniformBuffer(device, 64, { label: 'axisRenderer/vsUniforms' });
-  const fsUniformBuffer = createUniformBuffer(device, 16, { label: 'axisRenderer/fsUniforms' });
+  const fsUniformBufferLine = createUniformBuffer(device, 16, { label: 'axisRenderer/fsUniformsLine' });
+  const fsUniformBufferTick = createUniformBuffer(device, 16, { label: 'axisRenderer/fsUniformsTick' });
 
-  const bindGroup = device.createBindGroup({
+  const bindGroupLine = device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: vsUniformBuffer } },
-      { binding: 1, resource: { buffer: fsUniformBuffer } },
+      { binding: 1, resource: { buffer: fsUniformBufferLine } },
+    ],
+  });
+
+  const bindGroupTick = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: vsUniformBuffer } },
+      { binding: 1, resource: { buffer: fsUniformBufferTick } },
     ],
   });
 
@@ -198,7 +216,7 @@ export function createAxisRenderer(device: GPUDevice, options?: AxisRendererOpti
     if (disposed) throw new Error('AxisRenderer is disposed.');
   };
 
-  const prepare: AxisRenderer['prepare'] = (axisConfig, scale, orientation, gridArea) => {
+  const prepare: AxisRenderer['prepare'] = (axisConfig, scale, orientation, gridArea, axisLineColor, axisTickColor) => {
     assertNotDisposed();
 
     if (orientation !== 'x' && orientation !== 'y') {
@@ -230,10 +248,31 @@ export function createAxisRenderer(device: GPUDevice, options?: AxisRendererOpti
     // Identity transform (vertices already in clip-space).
     writeUniformBuffer(device, vsUniformBuffer, createIdentityMat4Buffer());
 
-    // Slightly brighter than grid.
-    const colorBuffer = new ArrayBuffer(4 * 4);
-    new Float32Array(colorBuffer).set([1.0, 1.0, 1.0, 0.8]);
-    writeUniformBuffer(device, fsUniformBuffer, colorBuffer);
+    // Separate colors for baseline vs ticks.
+    // Gracefully fall back to legacy (slightly brighter than grid) when parsing fails.
+    const axisLineColorString = axisLineColor ?? 'rgba(255,255,255,0.8)';
+    const axisTickColorString = axisTickColor ?? axisLineColorString;
+
+    const axisLineRgba = parseCssColorToRgba01(axisLineColorString) ?? DEFAULT_AXIS_RGBA;
+    const axisTickRgba = parseCssColorToRgba01(axisTickColorString) ?? axisLineRgba;
+
+    const lineColorBuffer = new ArrayBuffer(4 * 4);
+    new Float32Array(lineColorBuffer).set([
+      axisLineRgba[0],
+      axisLineRgba[1],
+      axisLineRgba[2],
+      axisLineRgba[3],
+    ]);
+    writeUniformBuffer(device, fsUniformBufferLine, lineColorBuffer);
+
+    const tickColorBuffer = new ArrayBuffer(4 * 4);
+    new Float32Array(tickColorBuffer).set([
+      axisTickRgba[0],
+      axisTickRgba[1],
+      axisTickRgba[2],
+      axisTickRgba[3],
+    ]);
+    writeUniformBuffer(device, fsUniformBufferTick, tickColorBuffer);
   };
 
   const render: AxisRenderer['render'] = (passEncoder) => {
@@ -241,9 +280,17 @@ export function createAxisRenderer(device: GPUDevice, options?: AxisRendererOpti
     if (vertexCount === 0 || !vertexBuffer) return;
 
     passEncoder.setPipeline(pipeline);
-    passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, vertexBuffer);
-    passEncoder.draw(vertexCount);
+
+    // Baseline: first 2 vertices.
+    passEncoder.setBindGroup(0, bindGroupLine);
+    passEncoder.draw(Math.min(2, vertexCount));
+
+    // Ticks: remaining vertices.
+    if (vertexCount > 2) {
+      passEncoder.setBindGroup(0, bindGroupTick);
+      passEncoder.draw(vertexCount - 2, 1, 2, 0);
+    }
   };
 
   const dispose: AxisRenderer['dispose'] = () => {
@@ -256,7 +303,12 @@ export function createAxisRenderer(device: GPUDevice, options?: AxisRendererOpti
       // best-effort
     }
     try {
-      fsUniformBuffer.destroy();
+      fsUniformBufferLine.destroy();
+    } catch {
+      // best-effort
+    }
+    try {
+      fsUniformBufferTick.destroy();
     } catch {
       // best-effort
     }

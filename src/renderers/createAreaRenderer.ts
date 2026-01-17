@@ -1,6 +1,7 @@
 import areaWgsl from '../shaders/area.wgsl?raw';
 import type { ResolvedAreaSeriesConfig } from '../config/OptionResolver';
 import type { LinearScale } from '../utils/scales';
+import { parseCssColorToRgba01 } from '../utils/colors';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
 
 export interface AreaRenderer {
@@ -30,59 +31,8 @@ type Rgba = readonly [r: number, g: number, b: number, a: number];
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 
 const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
-
-const parseHexNibble = (hex: string): number => {
-  const n = Number.parseInt(hex, 16);
-  return Number.isFinite(n) ? n : 0;
-};
-
-const parseHexByte = (hex: string): number => {
-  const n = Number.parseInt(hex, 16);
-  return Number.isFinite(n) ? n : 0;
-};
-
-const parseHexColorToRgba = (color: string): Rgba => {
-  const c = color.trim();
-  if (!c.startsWith('#')) return [0, 0, 0, 1];
-
-  const hex = c.slice(1);
-
-  // #rgb
-  if (hex.length === 3) {
-    const r = parseHexNibble(hex[0]);
-    const g = parseHexNibble(hex[1]);
-    const b = parseHexNibble(hex[2]);
-    return [(r * 17) / 255, (g * 17) / 255, (b * 17) / 255, 1];
-  }
-
-  // #rgba
-  if (hex.length === 4) {
-    const r = parseHexNibble(hex[0]);
-    const g = parseHexNibble(hex[1]);
-    const b = parseHexNibble(hex[2]);
-    const a = parseHexNibble(hex[3]);
-    return [(r * 17) / 255, (g * 17) / 255, (b * 17) / 255, (a * 17) / 255];
-  }
-
-  // #rrggbb
-  if (hex.length === 6) {
-    const r = parseHexByte(hex.slice(0, 2));
-    const g = parseHexByte(hex.slice(2, 4));
-    const b = parseHexByte(hex.slice(4, 6));
-    return [r / 255, g / 255, b / 255, 1];
-  }
-
-  // #rrggbbaa
-  if (hex.length === 8) {
-    const r = parseHexByte(hex.slice(0, 2));
-    const g = parseHexByte(hex.slice(2, 4));
-    const b = parseHexByte(hex.slice(4, 6));
-    const a = parseHexByte(hex.slice(6, 8));
-    return [r / 255, g / 255, b / 255, a / 255];
-  }
-
-  return [0, 0, 0, 1];
-};
+const parseSeriesColorToRgba01 = (color: string): Rgba =>
+  parseCssColorToRgba01(color) ?? ([0, 0, 0, 1] as const);
 
 const isTupleDataPoint = (point: ResolvedAreaSeriesConfig['data'][number]): point is readonly [x: number, y: number] =>
   Array.isArray(point);
@@ -298,7 +248,7 @@ export function createAreaRenderer(device: GPUDevice, options?: AreaRendererOpti
     const transformBuffer = createTransformMat4Buffer(ax, bx, ay, by);
     writeUniformBuffer(device, vsUniformBuffer, createVsUniformBuffer(transformBuffer, baselineValue));
 
-    const [r, g, b, a] = parseHexColorToRgba(seriesConfig.color);
+    const [r, g, b, a] = parseSeriesColorToRgba01(seriesConfig.color);
     const opacity = clamp01(seriesConfig.areaStyle.opacity);
     const colorBuffer = new ArrayBuffer(4 * 4);
     new Float32Array(colorBuffer).set([r, g, b, clamp01(a * opacity)]);

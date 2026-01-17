@@ -33,6 +33,10 @@ Chart configuration options.
 
 See [`types.ts`](../src/config/types.ts) for the full type definition.
 
+**Theme (essential):**
+
+- **`ChartGPUOptions.theme`**: accepts `'dark' | 'light'` or a [`ThemeConfig`](../src/themes/types.ts) object. See [`ChartGPUOptions`](../src/config/types.ts) and [`ThemeName` / `getTheme`](../src/themes/index.ts).
+
 **Data points (essential):**
 
 - **`DataPoint`**: a series data point is either a tuple (`readonly [x, y]`) or an object (`Readonly<{ x, y }>`). See [`types.ts`](../src/config/types.ts).
@@ -58,7 +62,7 @@ See [`defaults.ts`](../src/config/defaults.ts) for the defaults (including grid,
 **Behavior notes (essential):**
 
 - **Default grid**: `left: 60`, `right: 20`, `top: 40`, `bottom: 40`
-- **Palette / series colors**: `palette` is used to fill missing `series[i].color` by index
+- **Palette / series colors**: `ChartGPUOptions.palette` acts as an override for the resolved theme palette (`resolvedOptions.theme.colorPalette`). When `series[i].color` is missing, the default series color comes from `resolvedOptions.theme.colorPalette[i % ...]`. For backward compatibility, the resolved `palette` is the resolved theme palette. See [`resolveOptions`](../src/config/OptionResolver.ts) and [`ThemeConfig`](../src/themes/types.ts).
 - **Axis ticks**: `AxisConfig.tickLength` controls tick length in CSS pixels (default: 6)
 
 ### `resolveOptions(userOptions?: ChartGPUOptions)` / `OptionResolver.resolve(userOptions?: ChartGPUOptions)`
@@ -67,11 +71,27 @@ Resolves user options against defaults by deep-merging user-provided values with
 
 See [`OptionResolver.ts`](../src/config/OptionResolver.ts) for the resolver API and resolved option types.
 
+**Behavior notes (essential):**
+
+- **Theme input**: `ChartGPUOptions.theme` accepts `'dark' | 'light'` or a [`ThemeConfig`](../src/themes/types.ts); the resolved `theme` is always a concrete `ThemeConfig`. See [`ChartGPUOptions`](../src/config/types.ts) and [`resolveOptions`](../src/config/OptionResolver.ts).
+- **Default theme**: when `theme` is omitted, the resolved theme defaults to `'dark'` via [`getTheme`](../src/themes/index.ts) (preset: [`darkTheme`](../src/themes/darkTheme.ts)).
+- **Theme name resolution**: `resolveOptions({ theme: 'light' })` resolves `theme` to the light preset config (see [`lightTheme`](../src/themes/lightTheme.ts)).
+- **Palette override**: when `ChartGPUOptions.palette` is provided (non-empty), it overrides the resolved theme palette (`resolvedOptions.theme.colorPalette`). The resolved `palette` mirrors the resolved theme palette for backward compatibility. See [`resolveOptions`](../src/config/OptionResolver.ts).
+
 ### `ThemeConfig`
 
-Theme configuration type for describing chart theme colors, palette, and typography.
+Theme configuration type for describing chart theme colors, palette, and typography. Used by `ChartGPUOptions.theme` (and produced by [`resolveOptions`](../src/config/OptionResolver.ts)).
 
 See [`types.ts`](../src/themes/types.ts).
+
+### Theme presets
+
+ChartGPU provides built-in theme presets and a small helper for selecting them. These are exported from the public entrypoint; see [`src/index.ts`](../src/index.ts).
+
+- **`darkTheme: ThemeConfig`**: built-in dark preset. See [`darkTheme.ts`](../src/themes/darkTheme.ts).
+- **`lightTheme: ThemeConfig`**: built-in light preset. See [`lightTheme.ts`](../src/themes/lightTheme.ts).
+- **`ThemeName = 'dark' | 'light'`**: preset name union. See [`themes/index.ts`](../src/themes/index.ts).
+- **`getTheme(name: ThemeName): ThemeConfig`**: returns a preset by name. See [`themes/index.ts`](../src/themes/index.ts).
 
 ## Scales (Pure utilities)
 
@@ -215,6 +235,19 @@ All WebGPU types are provided by `@webgpu/types`. See [GPUContext.ts](../src/cor
 
 Chart data uploads and per-series GPU vertex buffer caching are handled by the internal `createDataStore(device)` helper. See [`createDataStore.ts`](../src/data/createDataStore.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
 
+### Text overlay (internal / contributor notes)
+
+An internal DOM helper for rendering text labels above the canvas using an absolutely-positioned HTML overlay. See [`createTextOverlay.ts`](../src/components/createTextOverlay.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
+
+- **Factory**: `createTextOverlay(container: HTMLElement): TextOverlay`
+- **`TextOverlay` methods (essential)**:
+  - `clear(): void`
+  - `addLabel(text: string, x: number, y: number, options?: TextOverlayLabelOptions): HTMLSpanElement`
+  - `dispose(): void`
+- **Coordinates**: `x` / `y` are in CSS pixels relative to the container’s top-left corner.
+- **Pointer events**: the overlay uses `pointer-events: none` so it won’t intercept mouse/touch input.
+- **Current usage**: used by the render coordinator to render numeric axis tick value labels above the canvas. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+
 ### Render coordinator (internal / contributor notes)
 
 A small orchestration layer for “resolved options → render pass submission”.
@@ -235,6 +268,11 @@ See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) for t
 - **Scales**: derives `xScale`/`yScale` in clip space; respects explicit axis `min`/`max` overrides and otherwise falls back to global series bounds.
 - **Orchestration order**: clear → grid → area fills → line strokes → axes.
 - **Target format**: uses `gpuContext.preferredFormat` (fallback `'bgra8unorm'`) for renderer pipelines; must match the render pass color attachment format.
+- **Theme application (essential)**: see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+  - Background clear uses `resolvedOptions.theme.backgroundColor`.
+  - Grid lines use `resolvedOptions.theme.gridLineColor`.
+  - Axes use `resolvedOptions.theme.axisLineColor` (baseline) and `resolvedOptions.theme.axisTickColor` (ticks).
+  - Axis tick value labels are rendered as DOM text (via the internal [text overlay](#text-overlay-internal--contributor-notes)) and styled using `resolvedOptions.theme.textColor`, `resolvedOptions.theme.fontSize`, and `resolvedOptions.theme.fontFamily` (see [`ThemeConfig`](../src/themes/types.ts)).
 
 ### Renderer utilities (Contributor notes)
 
@@ -282,16 +320,20 @@ A minimal grid-line renderer factory lives in [`createGridRenderer.ts`](../src/r
 
 The factory supports `createGridRenderer(device, options?)` where `options.targetFormat?: GPUTextureFormat` must match the canvas context format used for the render pass color attachment (usually `GPUContextState.preferredFormat`) to avoid a WebGPU validation error caused by a pipeline/attachment format mismatch.
 
+Grid line color is supplied from the resolved theme (`theme.gridLineColor`) by the render coordinator and passed via `prepare(gridArea, { color })`. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and [`createGridRenderer.ts`](../src/renderers/createGridRenderer.ts).
+
 #### Axis renderer (internal / contributor notes)
 
 A minimal axis (baseline + ticks) renderer factory lives in [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts). It is currently internal (not part of the public API exports) and is exercised by [`examples/grid-test/main.ts`](../examples/grid-test/main.ts).
 
 - **`createAxisRenderer(device: GPUDevice, options?: AxisRendererOptions): AxisRenderer`**
 - **`AxisRendererOptions.targetFormat?: GPUTextureFormat`**: must match the render pass color attachment format (typically `GPUContextState.preferredFormat`). Defaults to `'bgra8unorm'` for backward compatibility.
-- **`AxisRenderer.prepare(axisConfig: AxisConfig, scale: LinearScale, orientation: 'x' | 'y', gridArea: GridArea): void`**
+- **`AxisRenderer.prepare(axisConfig: AxisConfig, scale: LinearScale, orientation: 'x' | 'y', gridArea: GridArea, axisLineColor?: string, axisTickColor?: string): void`**
   - **`orientation`**: `'x'` renders the baseline along the bottom edge of the plot area (ticks extend outward/down); `'y'` renders along the left edge (ticks extend outward/left).
   - **Ticks**: placed at regular intervals across the axis domain.
+  - **Tick labels**: numeric tick value labels are rendered for each tick mark (label count matches tick count). The current tick count is fixed at 5; see [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
   - **Tick length**: `AxisConfig.tickLength` is in CSS pixels (default: 6).
+  - **Baseline vs ticks**: the baseline and tick segments can be styled with separate colors (`axisLineColor` vs `axisTickColor`).
 
 **WGSL imports:** renderers may import WGSL as a raw string via Vite’s `?raw` query (e.g. `*.wgsl?raw`). TypeScript support for this pattern is provided by [`wgsl-raw.d.ts`](../src/wgsl-raw.d.ts).
 
