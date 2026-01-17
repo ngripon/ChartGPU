@@ -1,0 +1,11 @@
+{
+    "name": "setup-docs-context",
+    "description": "Find core markdown docs and prepare them to be added to @Docs.",
+    "prompt": [
+      "Scan this repo for key markdown files (README, docs/**/*.md, design/**/*.md).",
+      "List the 5–10 most important files with a one-line description each.",
+      "For each, propose a clear @Docs title and short summary that will help the agent use it as context.",
+      "Do not edit files; only return the list and summaries."
+    ]
+  }
+  

@@ -1,0 +1,103 @@
+---
+description: Documentation standards - no code blocks, link to source files instead
+globs: "**/*.md"
+alwaysApply: false
+---
+
+# Documentation Standards
+
+## Core Principles
+
+1. **No code blocks in documentation** - Code examples should not appear in markdown files
+2. **Link to source files** - If code is necessary for understanding, link to the actual source file
+3. **ONLY include essential information** - Documentation must be minimal and focused. If information can be found in the source code, don't duplicate it. Include only what developers absolutely need to know to use the API.
+
+## Guidelines
+
+### Code References
+
+Instead of including code blocks, link to the source files:
+
+```markdown
+<!-- ❌ BAD -->
+```typescript
+export class GPUContext {
+  async initialize(): Promise<void> {
+    // ...
+  }
+}
+```
+
+<!-- ✅ GOOD -->
+See [GPUContext implementation](../src/core/GPUContext.ts) for the complete class definition.
+```
+
+### Examples
+
+Instead of showing code examples, reference the source:
+
+```markdown
+<!-- ❌ BAD -->
+**Example:**
+```typescript
+const context = await GPUContext.create();
+```
+
+<!-- ✅ GOOD -->
+See [usage examples](../examples/basic-usage.ts) for implementation patterns.
+```
+
+### API Documentation
+
+For API documentation:
+- Describe what the API does, not how it's implemented
+- Link to TypeScript definition files or source files
+- Include ONLY essential information: function signatures, critical parameters, return types, and key error conditions
+- Omit verbose error message listings, detailed implementation notes, and redundant descriptions
+- If it's in the source code with clear naming, don't repeat it in docs
+
+### File Linking Format
+
+Use relative paths to link to source files:
+- `[filename](../src/path/to/file.ts)` for source files
+- `[filename](../examples/example.ts)` for example files
+- Use GitHub-style links if repository is public
+
+### What to Include
+
+✅ **DO include (ESSENTIAL ONLY):**
+- Function/method names and signatures
+- Critical parameters (only if not obvious from name)
+- Return types
+- Key error conditions (brief, not full error messages)
+- Links to source files for details
+- One-sentence descriptions when necessary for clarity
+
+❌ **DON'T include:**
+- Code blocks with implementation
+- Copy-paste examples
+- Verbose explanations that repeat what's in code
+- Duplicate information from source files
+- Detailed error message listings
+- Step-by-step implementation details
+- Redundant descriptions
+- "Best practices" sections that are obvious
+- Long lists of properties/methods - link to source instead
+
+## Example Structure
+
+```markdown
+# API Reference
+
+## GPUContext
+
+Manages WebGPU adapter and device initialization.
+
+See [GPUContext.ts](../src/core/GPUContext.ts) for implementation.
+
+### `initialize(): Promise<void>`
+
+Initializes the WebGPU context.
+
+**Throws:** Error if WebGPU unavailable or initialization fails
+```
