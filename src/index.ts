@@ -4,4 +4,5 @@
 
 export const version = '1.0.0';
 
-// Main library exports will be added here
+// Core exports
+export { GPUContext } from './core/GPUContext';

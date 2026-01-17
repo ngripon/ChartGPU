@@ -1,0 +1,104 @@
+---
+description: Documentation standards - no code blocks, link to source files instead
+globs: "**/*.md"
+alwaysApply: false
+---
+
+# Documentation Standards
+
+## Core Principles
+
+1. **No code blocks in documentation** - Code examples should not appear in markdown files
+2. **Link to source files** - If code is necessary for understanding, link to the actual source file
+3. **Keep it concise** - Documentation should be brief and focused, avoiding bloated content
+
+## Guidelines
+
+### Code References
+
+Instead of including code blocks, link to the source files:
+
+```markdown
+<!-- ❌ BAD -->
+```typescript
+export class GPUContext {
+  async initialize(): Promise<void> {
+    // ...
+  }
+}
+```
+
+<!-- ✅ GOOD -->
+See [GPUContext implementation](../src/core/GPUContext.ts) for the complete class definition.
+```
+
+### Examples
+
+Instead of showing code examples, reference the source:
+
+```markdown
+<!-- ❌ BAD -->
+**Example:**
+```typescript
+const context = await GPUContext.create();
+```
+
+<!-- ✅ GOOD -->
+See [usage examples](../examples/basic-usage.ts) for implementation patterns.
+```
+
+### API Documentation
+
+For API documentation:
+- Describe what the API does, not how it's implemented
+- Link to TypeScript definition files or source files
+- Focus on behavior, parameters, and return values
+- Avoid showing implementation details
+
+### File Linking Format
+
+Use relative paths to link to source files:
+- `[filename](../src/path/to/file.ts)` for source files
+- `[filename](../examples/example.ts)` for example files
+- Use GitHub-style links if repository is public
+
+### What to Include
+
+✅ **DO include:**
+- Clear descriptions of functionality
+- Parameter and return type information (without code blocks)
+- Links to relevant source files
+- Conceptual explanations
+- Usage guidance and best practices
+
+❌ **DON'T include:**
+- Code blocks with implementation
+- Copy-paste examples
+- Verbose explanations that repeat what's in code
+- Duplicate information from source files
+
+## Example Structure
+
+```markdown
+# API Reference
+
+## GPUContext
+
+The GPUContext class manages WebGPU adapter and device initialization.
+
+See [GPUContext.ts](../src/core/GPUContext.ts) for implementation.
+
+### Methods
+
+#### `initialize()`
+
+Initializes the WebGPU context by requesting an adapter and device.
+
+**Parameters:** None
+
+**Returns:** Promise that resolves when initialization completes
+
+**Throws:** Error if WebGPU is unavailable or initialization fails
+
+For usage examples, see [basic-usage.ts](../examples/basic-usage.ts).
+```
