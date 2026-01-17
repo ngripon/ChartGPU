@@ -4,8 +4,8 @@
  * Manages a requestAnimationFrame-based render loop that runs at 60fps,
  * providing delta time tracking and frame scheduling control.
  * 
- * The scheduler tracks delta time between frames and supports future
- * optimizations through dirty frame marking.
+ * This module provides both functional and class-based APIs for maximum flexibility.
+ * The functional API is preferred for better type safety and immutability.
  */
 
 /**
@@ -15,132 +15,285 @@
 export type RenderCallback = (deltaTime: number) => void;
 
 /**
- * RenderScheduler manages a 60fps render loop using requestAnimationFrame.
+ * Represents the state of a render scheduler.
+ * All properties are readonly to ensure immutability.
+ */
+export interface RenderSchedulerState {
+  readonly id: symbol;
+  readonly running: boolean;
+}
+
+/**
+ * Internal mutable state for the render scheduler.
+ * Stored separately from the public state interface.
+ */
+interface RenderSchedulerInternalState {
+  rafId: number | null;
+  callback: RenderCallback | null;
+  lastFrameTime: number;
+  dirty: boolean;
+}
+
+/**
+ * Map to store internal mutable state for each scheduler state instance.
+ * Keyed by the state's unique ID symbol.
+ */
+const internalStateMap = new Map<symbol, RenderSchedulerInternalState>();
+
+/**
+ * Creates a new RenderScheduler state with initial values.
  * 
- * Provides start/stop control and delta time tracking for frame-based rendering.
- * The scheduler is designed to work seamlessly with WebGPU rendering pipelines.
+ * @returns A new RenderSchedulerState instance
+ */
+export function createRenderScheduler(): RenderSchedulerState {
+  const id = Symbol('RenderScheduler');
+  const state: RenderSchedulerState = {
+    id,
+    running: false,
+  };
+
+  // Initialize internal mutable state
+  internalStateMap.set(id, {
+    rafId: null,
+    callback: null,
+    lastFrameTime: 0,
+    dirty: false,
+  });
+
+  return state;
+}
+
+/**
+ * Starts the render loop.
+ * 
+ * Begins a requestAnimationFrame loop that calls the provided callback
+ * every frame with the delta time in milliseconds since the last frame.
+ * Returns a new state object with running set to true.
+ * 
+ * @param state - The scheduler state to start
+ * @param callback - Function to call each frame with delta time
+ * @returns A new RenderSchedulerState with running set to true
+ * @throws {Error} If callback is not provided
+ * @throws {Error} If scheduler is already running
+ * @throws {Error} If state is invalid
+ */
+export function startRenderScheduler(
+  state: RenderSchedulerState,
+  callback: RenderCallback
+): RenderSchedulerState {
+  if (!callback) {
+    throw new Error('Render callback is required');
+  }
+
+  const internalState = internalStateMap.get(state.id);
+  if (!internalState) {
+    throw new Error('Invalid scheduler state. Use createRenderScheduler() to create a new state.');
+  }
+
+  if (state.running) {
+    throw new Error('RenderScheduler is already running. Call stopRenderScheduler() before starting again.');
+  }
+
+  // Update internal state
+  internalState.callback = callback;
+  internalState.lastFrameTime = performance.now();
+  internalState.dirty = true;
+
+  const schedulerId = state.id;
+  const frameHandler = (currentTime: number) => {
+    // Look up internal state - may be null if scheduler was destroyed
+    const currentInternalState = internalStateMap.get(schedulerId);
+    if (!currentInternalState || !currentInternalState.callback) {
+      // Scheduler was stopped or destroyed, exit gracefully
+      return;
+    }
+
+    const deltaTime = currentTime - currentInternalState.lastFrameTime;
+    currentInternalState.lastFrameTime = currentTime;
+
+    // Future optimization: skip render if not dirty
+    // Currently always renders, but dirty flag is tracked for future use
+    if (currentInternalState.dirty) {
+      // Reset dirty flag after checking (for future frame-skipping optimization)
+      currentInternalState.dirty = false;
+    }
+
+    // Call the render callback with delta time
+    currentInternalState.callback(deltaTime);
+
+    // Continue the loop if still running
+    // Re-check internal state in case it was destroyed during callback execution
+    const nextInternalState = internalStateMap.get(schedulerId);
+    if (nextInternalState && nextInternalState.callback) {
+      nextInternalState.rafId = requestAnimationFrame(frameHandler);
+    }
+  };
+
+  // Start the first frame
+  internalState.rafId = requestAnimationFrame(frameHandler);
+
+  // Return new state with running set to true
+  return {
+    id: state.id,
+    running: true,
+  };
+}
+
+/**
+ * Stops the render loop.
+ * 
+ * Cancels any pending requestAnimationFrame calls and stops the loop.
+ * Returns a new state object with running set to false.
+ * The scheduler can be restarted by calling startRenderScheduler() again.
+ * 
+ * @param state - The scheduler state to stop
+ * @returns A new RenderSchedulerState with running set to false
+ * @throws {Error} If state is invalid
+ */
+export function stopRenderScheduler(state: RenderSchedulerState): RenderSchedulerState {
+  const internalState = internalStateMap.get(state.id);
+  if (!internalState) {
+    throw new Error('Invalid scheduler state. Use createRenderScheduler() to create a new state.');
+  }
+
+  internalState.callback = null;
+
+  if (internalState.rafId !== null) {
+    cancelAnimationFrame(internalState.rafId);
+    internalState.rafId = null;
+  }
+
+  // Return new state with running set to false
+  return {
+    id: state.id,
+    running: false,
+  };
+}
+
+/**
+ * Marks the current frame as dirty, indicating it needs to be rendered.
+ * 
+ * This function is prepared for future optimization where frames can be
+ * skipped if nothing has changed. Currently, all frames render regardless
+ * of the dirty flag.
+ * 
+ * @param state - The scheduler state
+ * @throws {Error} If state is invalid
+ */
+export function requestRender(state: RenderSchedulerState): void {
+  const internalState = internalStateMap.get(state.id);
+  if (!internalState) {
+    throw new Error('Invalid scheduler state. Use createRenderScheduler() to create a new state.');
+  }
+
+  // Mark as dirty even if not running (for future use when scheduler starts)
+  internalState.dirty = true;
+}
+
+/**
+ * Destroys the render scheduler and cleans up resources.
+ * Stops the loop if running and removes internal state from the map.
+ * Returns a new state object with reset values.
+ * After calling this, the scheduler must be recreated before use.
+ * 
+ * **Important:** Always call this function when done with a scheduler to prevent memory leaks.
+ * The internal state map will retain entries until explicitly destroyed.
+ * 
+ * @param state - The scheduler state to destroy
+ * @returns A new RenderSchedulerState with reset values
+ */
+export function destroyRenderScheduler(state: RenderSchedulerState): RenderSchedulerState {
+  const internalState = internalStateMap.get(state.id);
+  
+  if (internalState) {
+    // Stop the loop if running
+    if (internalState.rafId !== null) {
+      cancelAnimationFrame(internalState.rafId);
+      internalState.rafId = null;
+    }
+    
+    // Clear callback to prevent further execution
+    internalState.callback = null;
+    
+    // Clean up internal state from map to prevent memory leak
+    internalStateMap.delete(state.id);
+  }
+
+  // Return new state with reset values
+  return createRenderScheduler();
+}
+
+/**
+ * Convenience function that creates a scheduler and starts it in one step.
+ * 
+ * @param callback - Function to call each frame with delta time
+ * @returns A RenderSchedulerState with the loop running
+ * @throws {Error} If callback is not provided
  * 
  * @example
  * ```typescript
- * const scheduler = new RenderScheduler();
- * scheduler.start((deltaTime) => {
- *   // Render frame with delta time
+ * const scheduler = createRenderSchedulerAsync((deltaTime) => {
  *   renderFrame(deltaTime);
  * });
- * 
- * // Later, stop the loop
- * scheduler.stop();
  * ```
  */
+export function createRenderSchedulerAsync(callback: RenderCallback): RenderSchedulerState {
+  const state = createRenderScheduler();
+  return startRenderScheduler(state, callback);
+}
+
+/**
+ * RenderScheduler class wrapper for backward compatibility.
+ * 
+ * This class provides a class-based API that internally uses the functional implementation.
+ * Use the functional API directly for better type safety and immutability.
+ */
 export class RenderScheduler {
-  private rafId: number | null = null;
-  private isRunning: boolean = false;
-  private lastFrameTime: number = 0;
-  // Reserved for future optimization: skip frames when dirty is false
-  private _dirty: boolean = false;
+  private _state: RenderSchedulerState;
+
+  /**
+   * Checks if the scheduler is currently running.
+   */
+  get running(): boolean {
+    return this._state.running;
+  }
+
+  /**
+   * Creates a new RenderScheduler instance.
+   */
+  constructor() {
+    this._state = createRenderScheduler();
+  }
 
   /**
    * Starts the render loop.
    * 
-   * Begins a requestAnimationFrame loop that calls the provided callback
-   * every frame with the delta time in milliseconds since the last frame.
-   * 
    * @param callback - Function to call each frame with delta time
-   * @throws {Error} If callback is not provided
-   * @throws {Error} If scheduler is already running
-   * 
-   * @example
-   * ```typescript
-   * scheduler.start((deltaTime) => {
-   *   console.log(`Frame delta: ${deltaTime}ms`);
-   * });
-   * ```
+   * @throws {Error} If callback is not provided or scheduler already running
    */
   start(callback: RenderCallback): void {
-    if (!callback) {
-      throw new Error('Render callback is required');
-    }
-
-    if (this.isRunning) {
-      throw new Error('RenderScheduler is already running. Call stop() before starting again.');
-    }
-
-    this.isRunning = true;
-    this.lastFrameTime = performance.now();
-    // Mark as dirty for first frame (reserved for future optimization)
-    this._dirty = true;
-
-    const frameHandler = (currentTime: number) => {
-      if (!this.isRunning) {
-        return;
-      }
-
-      const deltaTime = currentTime - this.lastFrameTime;
-      this.lastFrameTime = currentTime;
-
-      // Future optimization: skip render if not dirty
-      // Currently always renders, but dirty flag is tracked for future use
-      if (this._dirty) {
-        // Reset dirty flag after checking (for future frame-skipping optimization)
-        this._dirty = false;
-      }
-
-      // Call the render callback with delta time
-      callback(deltaTime);
-
-      // Continue the loop if still running
-      if (this.isRunning) {
-        this.rafId = requestAnimationFrame(frameHandler);
-      }
-    };
-
-    // Start the first frame
-    this.rafId = requestAnimationFrame(frameHandler);
+    this._state = startRenderScheduler(this._state, callback);
   }
 
   /**
    * Stops the render loop.
-   * 
-   * Cancels any pending requestAnimationFrame calls and stops the loop.
-   * The scheduler can be restarted by calling start() again.
-   * 
-   * @example
-   * ```typescript
-   * scheduler.stop();
-   * ```
    */
   stop(): void {
-    this.isRunning = false;
-
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
-    }
+    this._state = stopRenderScheduler(this._state);
   }
 
   /**
    * Marks the current frame as dirty, indicating it needs to be rendered.
-   * 
-   * This method is prepared for future optimization where frames can be
-   * skipped if nothing has changed. Currently, all frames render regardless
-   * of the dirty flag.
-   * 
-   * @example
-   * ```typescript
-   * // Mark frame as needing render after state change
-   * scheduler.requestRender();
-   * ```
    */
   requestRender(): void {
-    this._dirty = true;
+    requestRender(this._state);
   }
 
   /**
-   * Checks if the scheduler is currently running.
-   * 
-   * @returns True if the render loop is active, false otherwise
+   * Destroys the render scheduler and cleans up resources.
+   * After calling destroy(), the scheduler must be recreated before use.
    */
-  get running(): boolean {
-    return this.isRunning;
+  destroy(): void {
+    this._state = destroyRenderScheduler(this._state);
   }
 }

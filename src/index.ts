@@ -17,5 +17,16 @@ export {
 // Class-based API (for backward compatibility)
 export { GPUContext } from './core/GPUContext';
 
-// Render scheduler
-export { RenderScheduler, type RenderCallback } from './core/RenderScheduler';
+// Render scheduler - Functional API (preferred)
+export type { RenderSchedulerState, RenderCallback } from './core/RenderScheduler';
+export {
+  createRenderScheduler,
+  createRenderSchedulerAsync,
+  startRenderScheduler,
+  stopRenderScheduler,
+  requestRender,
+  destroyRenderScheduler,
+} from './core/RenderScheduler';
+
+// Class-based API (for backward compatibility)
+export { RenderScheduler } from './core/RenderScheduler';
