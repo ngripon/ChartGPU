@@ -169,6 +169,10 @@ Getter that returns `true` if the scheduler is currently running.
 
 All WebGPU types are provided by `@webgpu/types`. See [GPUContext.ts](../src/core/GPUContext.ts) and [RenderScheduler.ts](../src/core/RenderScheduler.ts) for type usage.
 
+## Internal modules (Contributor notes)
+
+Chart data uploads and per-series GPU vertex buffer caching are handled by the internal `createDataStore(device)` helper. See [`createDataStore.ts`](../src/data/createDataStore.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
+
 ## Related Resources
 
 - [WebGPU Specification](https://www.w3.org/TR/webgpu/)

@@ -58,7 +58,7 @@ Now that you have a GPU context initialized, you can:
 
 1. **Create GPU resources** - Use the device to create buffers, textures, and pipelines
 2. **Set up rendering** - Configure render pipelines for drawing charts
-3. **Handle data** - Upload chart data to GPU buffers
+3. **Handle data** - Upload chart data to GPU buffers (internal helper: [`createDataStore.ts`](../src/data/createDataStore.ts))
 4. **Render** - Execute render passes to draw your charts
 
 ## Troubleshooting
