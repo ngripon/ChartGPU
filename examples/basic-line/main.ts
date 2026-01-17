@@ -1,5 +1,7 @@
 import { ChartGPU } from '../../src/index';
 import type { ChartGPUOptions, DataPoint } from '../../src/index';
+import { createEventManager } from '../../src/interaction/createEventManager';
+import type { GridArea } from '../../src/renderers/createGridRenderer';
 
 const createSineWave = (
   count: number,
@@ -71,6 +73,26 @@ async function main() {
 
   const chart = await ChartGPU.create(container, options);
 
+  // Story 3.1 acceptance-only: verify interaction event manager emits grid-relative coords (CSS px).
+  const canvas = container.querySelector('canvas');
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    throw new Error('Chart canvas not found');
+  }
+
+  const makeGridArea = (): GridArea => ({
+    left: options.grid?.left ?? 0,
+    right: options.grid?.right ?? 0,
+    top: options.grid?.top ?? 0,
+    bottom: options.grid?.bottom ?? 0,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height,
+  });
+
+  const eventManager = createEventManager(canvas, makeGridArea());
+  eventManager.on('mousemove', (payload) => {
+    console.log(payload.gridX, payload.gridY, payload.isInGrid);
+  });
+
   // Keep the canvas crisp as the container resizes.
   let scheduled = false;
   const ro = new ResizeObserver(() => {
@@ -79,15 +101,18 @@ async function main() {
     requestAnimationFrame(() => {
       scheduled = false;
       chart.resize();
+      eventManager.updateGridArea(makeGridArea());
     });
   });
   ro.observe(container);
 
   // Initial sizing/render.
   chart.resize();
+  eventManager.updateGridArea(makeGridArea());
 
   window.addEventListener('beforeunload', () => {
     ro.disconnect();
+    eventManager.dispose();
     chart.dispose();
   });
 }
