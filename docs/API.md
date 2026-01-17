@@ -1,5 +1,54 @@
 # API Reference
 
+## Chart API (Phase 1)
+
+See [ChartGPU.ts](../src/ChartGPU.ts) for the chart instance implementation.
+
+### `ChartGPU.create(container: HTMLElement, options: ChartGPUOptions): Promise<ChartGPUInstance>`
+
+Creates a chart instance bound to a container element.
+
+### `ChartGPUOptions`
+
+Chart configuration options.
+
+See [`types.ts`](../src/config/types.ts) for the full type definition.
+
+### `defaultOptions`
+
+Default chart options used as a baseline for resolution.
+
+See [`defaults.ts`](../src/config/defaults.ts) for the defaults (including grid, palette, and axis defaults).
+
+**Behavior notes (essential):**
+
+- **Default grid**: `left: 60`, `right: 20`, `top: 40`, `bottom: 40`
+- **Palette / series colors**: `palette` is used to fill missing `series[i].color` by index
+
+### `resolveOptions(userOptions?: ChartGPUOptions)` / `OptionResolver.resolve(userOptions?: ChartGPUOptions)`
+
+Resolves user options against defaults by deep-merging user-provided values with defaults and returning a resolved options object.
+
+See [`OptionResolver.ts`](../src/config/OptionResolver.ts) for the resolver API and resolved option types.
+
+## Scales (Pure utilities)
+
+ChartGPU exports a small set of pure utilities for mapping numeric domains to numeric ranges. See [`scales.ts`](../src/utils/scales.ts).
+
+### `createLinearScale(): LinearScale`
+
+Creates a linear scale with an initial identity mapping (domain `[0, 1]` -> range `[0, 1]`).
+
+**Behavior notes (essential):**
+
+- **Chainable setters**: `domain(min, max)` and `range(min, max)` return the same scale instance for chaining.
+- **`scale(value)`**: maps domain -> range with no clamping (values outside the domain extrapolate). If the domain span is zero (`min === max`), returns the midpoint of the range.
+- **`invert(pixel)`**: maps range -> domain with no clamping (pixels outside the range extrapolate). If the domain span is zero (`min === max`), returns `min` for any input.
+
+### `LinearScale`
+
+Type definition for the scale returned by `createLinearScale()`. See [`scales.ts`](../src/utils/scales.ts).
+
 ## Functional API (Preferred)
 
 The functional API provides a type-safe, immutable approach to managing WebGPU contexts.

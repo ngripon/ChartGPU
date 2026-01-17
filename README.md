@@ -15,15 +15,38 @@ ChartGPU leverages WebGPU to provide hardware-accelerated rendering for complex 
 
 ## Installation
 
-```bash
-npm install chartgpu
-```
+Install with `npm install chartgpu`.
 
 ## Quick Start
 
 Import `GPUContext` and call `GPUContext.create()` to initialize a GPU context. Access the device through the `device` property. Always call `destroy()` when finished.
 
 See [GPUContext implementation](src/core/GPUContext.ts) for details.
+
+## Chart API (Phase 1)
+
+`ChartGPU.create(container, options)` creates a chart instance bound to a container element.
+
+See [ChartGPU.ts](src/ChartGPU.ts) for the implementation.
+
+### Options and defaults
+
+Options are defined by [`ChartGPUOptions`](src/config/types.ts). Baseline defaults live in [`defaultOptions`](src/config/defaults.ts).
+
+- **Default grid**: `left: 60`, `right: 20`, `top: 40`, `bottom: 40`
+- **Palette / series colors**: `palette` is used to fill missing `series[i].color` by index
+
+To resolve user options against defaults, use [`OptionResolver.resolve(...)`](src/config/OptionResolver.ts) (or [`resolveOptions(...)`](src/config/OptionResolver.ts)). This merges user-provided values with defaults and returns resolved options.
+
+## Scales (Pure utilities)
+
+ChartGPU also exports a small pure linear scale utility for mapping numeric domains to numeric ranges. See [`scales.ts`](src/utils/scales.ts) and the “Scales” section in [`docs/API.md`](docs/API.md#scales-pure-utilities).
+
+**Behavior notes (essential):**
+
+- **Chainable setters**: `domain(min, max)` and `range(min, max)` return the same scale instance for chaining.
+- **`scale(value)` / `invert(pixel)`**: no clamping; values outside the configured domain/range extrapolate.
+- **Zero-span domain**: if `min === max`, `scale` returns the midpoint of the range and `invert` returns `min` for any input.
 
 ## Browser Compatibility
 

@@ -19,15 +19,8 @@ Before you begin, ensure you have:
 
 Install ChartGPU using npm or yarn:
 
-```bash
-npm install chartgpu
-```
-
-or
-
-```bash
-yarn add chartgpu
-```
+- Install with `npm install chartgpu`
+- Install with `yarn add chartgpu`
 
 ## Your First GPU Context
 

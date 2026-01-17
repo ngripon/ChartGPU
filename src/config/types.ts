@@ -47,5 +47,10 @@ export interface ChartGPUOptions {
   readonly xAxis?: AxisConfig;
   readonly yAxis?: AxisConfig;
   readonly series?: ReadonlyArray<SeriesConfig>;
+  /**
+   * Color palette used for series color assignment when a series does not
+   * explicitly specify `color`. Colors should be valid CSS color strings.
+   */
+  readonly palette?: ReadonlyArray<string>;
 }
 

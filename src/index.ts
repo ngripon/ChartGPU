@@ -17,6 +17,20 @@ export type {
   SeriesType,
 } from './config/types';
 
+// Options defaults + resolution
+export { defaultOptions } from './config/defaults';
+export { OptionResolver, resolveOptions } from './config/OptionResolver';
+export type {
+  ResolvedChartGPUOptions,
+  ResolvedGridConfig,
+  ResolvedLineStyleConfig,
+  ResolvedSeriesConfig,
+} from './config/OptionResolver';
+
+// Scales - Pure utilities
+export { createLinearScale } from './utils/scales';
+export type { LinearScale } from './utils/scales';
+
 // Core exports - Functional API (preferred)
 export type { GPUContextState } from './core/GPUContext';
 export {
