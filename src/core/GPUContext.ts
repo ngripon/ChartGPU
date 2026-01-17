@@ -171,6 +171,70 @@ export function getCanvasTexture(context: GPUContextState): GPUTexture {
 }
 
 /**
+ * Clears the canvas to a solid color.
+ * Creates a command encoder, begins a render pass with the specified clear color,
+ * ends the pass, and submits it to the queue.
+ * 
+ * @param context - The GPU context state
+ * @param r - Red component (0.0 to 1.0)
+ * @param g - Green component (0.0 to 1.0)
+ * @param b - Blue component (0.0 to 1.0)
+ * @param a - Alpha component (0.0 to 1.0)
+ * @throws {Error} If canvas is not configured or context is not initialized
+ * @throws {Error} If device is not available
+ * 
+ * @example
+ * ```typescript
+ * // Clear to dark purple (#1a1a2e)
+ * clearScreen(context, 0x1a / 255, 0x1a / 255, 0x2e / 255, 1.0);
+ * ```
+ */
+export function clearScreen(
+  context: GPUContextState,
+  r: number,
+  g: number,
+  b: number,
+  a: number
+): void {
+  // Validate color component ranges
+  if (r < 0 || r > 1 || g < 0 || g > 1 || b < 0 || b > 1 || a < 0 || a > 1) {
+    throw new Error('Color components must be in the range [0.0, 1.0]');
+  }
+
+  if (!context.canvas) {
+    throw new Error('Canvas is not configured. Provide a canvas element when creating the context.');
+  }
+
+  if (!context.initialized || !context.device || !context.canvasContext) {
+    throw new Error('GPUContext is not initialized. Call initializeGPUContext() first.');
+  }
+
+  // Get the current texture from the canvas
+  const texture = getCanvasTexture(context);
+
+  // Create command encoder
+  const encoder = context.device.createCommandEncoder();
+
+  // Begin render pass with clear color
+  const renderPass = encoder.beginRenderPass({
+    colorAttachments: [
+      {
+        view: texture.createView(),
+        clearValue: { r, g, b, a },
+        loadOp: 'clear',
+        storeOp: 'store',
+      },
+    ],
+  });
+
+  // End render pass
+  renderPass.end();
+
+  // Submit command buffer to queue
+  context.device.queue.submit([encoder.finish()]);
+}
+
+/**
  * Destroys the WebGPU device and cleans up resources.
  * Returns a new state object with reset values.
  * After calling this, the context must be reinitialized before use.
@@ -336,6 +400,28 @@ export class GPUContext {
    */
   getCanvasTexture(): GPUTexture {
     return getCanvasTexture(this._state);
+  }
+
+  /**
+   * Clears the canvas to a solid color.
+   * Creates a command encoder, begins a render pass with the specified clear color,
+   * ends the pass, and submits it to the queue.
+   * 
+   * @param r - Red component (0.0 to 1.0)
+   * @param g - Green component (0.0 to 1.0)
+   * @param b - Blue component (0.0 to 1.0)
+   * @param a - Alpha component (0.0 to 1.0)
+   * @throws {Error} If canvas is not configured or context is not initialized
+   * @throws {Error} If device is not available
+   * 
+   * @example
+   * ```typescript
+   * // Clear to dark purple (#1a1a2e)
+   * context.clearScreen(0x1a / 255, 0x1a / 255, 0x2e / 255, 1.0);
+   * ```
+   */
+  clearScreen(r: number, g: number, b: number, a: number): void {
+    clearScreen(this._state, r, g, b, a);
   }
 
   /**

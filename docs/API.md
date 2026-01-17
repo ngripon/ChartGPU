@@ -32,6 +32,16 @@ Gets the current texture from the canvas context.
 
 **Throws:** `Error` if canvas not configured or context not initialized
 
+### `clearScreen(context: GPUContextState, r: number, g: number, b: number, a: number): void`
+
+Clears the canvas to a solid color.
+
+**Parameters:** `r`, `g`, `b`, `a` - Color components in range [0.0, 1.0]
+
+**Throws:** `Error` if color components are out of range, canvas not configured, or context not initialized
+
+See [GPUContext.ts](../src/core/GPUContext.ts) for implementation.
+
 ### `destroyGPUContext(context: GPUContextState): GPUContextState`
 
 Destroys the WebGPU device and cleans up resources. Returns a new state object with reset values.
@@ -61,6 +71,7 @@ Factory method that creates and initializes a GPUContext instance.
 
 - `initialize(): Promise<void>` - Initializes the WebGPU context
 - `getCanvasTexture(): GPUTexture` - Gets the current canvas texture
+- `clearScreen(r: number, g: number, b: number, a: number): void` - Clears the canvas to a solid color
 - `destroy(): void` - Destroys the device and cleans up resources
 
 ## Error Handling

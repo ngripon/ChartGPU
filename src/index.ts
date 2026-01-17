@@ -11,6 +11,7 @@ export {
   createGPUContextAsync,
   initializeGPUContext,
   getCanvasTexture,
+  clearScreen,
   destroyGPUContext,
 } from './core/GPUContext';
 

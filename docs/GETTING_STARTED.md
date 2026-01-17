@@ -99,7 +99,14 @@ Now that you have a GPU context initialized, you can:
 
 ## Examples
 
-See the [examples directory](../examples/) for complete working examples (when available).
+See the [examples directory](../examples/) for complete working examples.
+
+The `hello-world` example demonstrates basic WebGPU pipeline usage. See [hello-world/main.ts](../examples/hello-world/main.ts) for implementation.
+
+To run examples:
+
+1. Start the development server: `npm run dev`
+2. Navigate to `http://localhost:5176/examples/index.html`
 
 ## API Reference
 

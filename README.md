@@ -53,6 +53,8 @@ See [GPUContext.ts](src/core/GPUContext.ts) for the complete implementation.
 
 **Instance Methods:**
 - `initialize()` - Initializes the WebGPU context. Throws Error if WebGPU is unavailable, adapter/device request fails, or context is already initialized
+- `getCanvasTexture()` - Gets the current texture from the canvas context
+- `clearScreen(r, g, b, a)` - Clears the canvas to a solid color using a WebGPU render pass. Color components must be in the range [0.0, 1.0]
 - `destroy()` - Destroys the WebGPU device and cleans up resources
 
 For detailed API documentation, see [API.md](docs/API.md).
@@ -71,7 +73,11 @@ Run `npm run build` to compile TypeScript and build the library.
 
 ### Development Mode
 
-Run `npm run dev` to start the development server.
+Run `npm run dev` to start the development server. Navigate to `http://localhost:5176/examples/index.html` to view the examples.
+
+## Examples
+
+See the [examples directory](examples/) for complete working examples. The `hello-world` example demonstrates basic WebGPU pipeline usage.
 
 ## License
 
