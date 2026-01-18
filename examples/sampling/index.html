@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sampling - ChartGPU</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    html, body {
+      height: 100%;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0a0a0a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+    .page {
+      min-height: 100%;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 16px;
+      padding: 20px;
+      box-sizing: border-box;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.4rem;
+      color: #fff;
+    }
+    header p {
+      margin: 8px 0 0;
+      color: #aaa;
+      line-height: 1.4;
+      max-width: 72ch;
+    }
+    .back {
+      display: inline-block;
+      margin-top: 10px;
+      color: #aaa;
+      text-decoration: none;
+    }
+    .back:hover {
+      color: #fff;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      border: 1px solid #333;
+      border-radius: 12px;
+      background: #0f0f14;
+      padding: 14px;
+    }
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      align-items: center;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #ddd;
+      font-size: 0.95rem;
+    }
+    select, input[type="number"], button {
+      font: inherit;
+      color: #e0e0e0;
+      background: #141420;
+      border: 1px solid #2b2b3a;
+      border-radius: 10px;
+      padding: 8px 10px;
+      outline: none;
+    }
+    select:focus, input[type="number"]:focus, button:focus {
+      border-color: #4a9eff;
+      box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.15);
+    }
+    button {
+      cursor: pointer;
+      border-color: #2b2b3a;
+      background: linear-gradient(180deg, #1b1b2a 0%, #141420 100%);
+    }
+    button:hover {
+      border-color: #3a3a50;
+      background: linear-gradient(180deg, #23233a 0%, #151525 100%);
+    }
+    .readouts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .readout-card {
+      border: 1px solid #2b2b3a;
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      min-width: 0;
+    }
+    .readout-title {
+      font-weight: 600;
+      color: #fff;
+      margin: 0 0 8px;
+      font-size: 0.95rem;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 6px 10px;
+      font-size: 0.92rem;
+      color: #cfcfe6;
+    }
+    .kv .k {
+      color: #a8a8c8;
+    }
+    .note {
+      color: #aaa;
+      font-size: 0.9rem;
+      line-height: 1.35;
+    }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    .chart-shell {
+      border: 1px solid #333;
+      border-radius: 12px;
+      background: #0f0f14;
+      overflow: hidden;
+      min-height: 360px;
+      height: min(44vh, 520px);
+      position: relative;
+    }
+    .chart {
+      width: 100%;
+      height: 100%;
+    }
+    .error {
+      padding: 16px;
+      color: #ffb4b4;
+      white-space: pre-wrap;
+      position: absolute;
+      inset: 0;
+      background: rgba(10, 10, 10, 0.85);
+    }
+    @media (max-width: 900px) {
+      .readouts {
+        grid-template-columns: 1fr;
+      }
+      .kv {
+        grid-template-columns: 140px 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Per-series sampling</h1>
+      <p>
+        This example shows how cartesian series sampling affects rendering + hit-testing for large datasets.
+        The readouts are computed via <code>resolveOptions</code> (the same resolver used by <code>ChartGPU.setOption</code>).
+      </p>
+      <a class="back" href="../index.html">← Back to examples</a>
+    </header>
+
+    <section class="controls">
+      <div class="controls-row">
+        <label>
+          Sampling mode
+          <select id="samplingMode">
+            <option value="none">none</option>
+            <option value="lttb">lttb</option>
+            <option value="average">average</option>
+            <option value="max">max</option>
+            <option value="min">min</option>
+          </select>
+        </label>
+
+        <label>
+          samplingThreshold
+          <input id="samplingThreshold" type="number" min="2" step="1" inputmode="numeric" />
+        </label>
+
+        <button id="apply">Apply (setOption)</button>
+      </div>
+
+      <div class="readouts">
+        <div class="readout-card">
+          <div class="readout-title">Line series (100k points)</div>
+          <div class="kv">
+            <div class="k">Raw points</div><div id="lineRaw">—</div>
+            <div class="k">Rendered points</div><div id="lineRendered">—</div>
+            <div class="k">Resolved sampling</div><div id="lineMode">—</div>
+            <div class="k">Resolved threshold</div><div id="lineThreshold">—</div>
+          </div>
+        </div>
+
+        <div class="readout-card">
+          <div class="readout-title">Scatter series (per-point size)</div>
+          <div class="kv">
+            <div class="k">Raw points</div><div id="scatterRaw">—</div>
+            <div class="k">Rendered points</div><div id="scatterRendered">—</div>
+            <div class="k">Resolved sampling</div><div id="scatterMode">—</div>
+            <div class="k">Resolved threshold</div><div id="scatterThreshold">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        Note: sampling affects rendering + cartesian hit-testing only; <strong>axis bounds use raw (unsampled) data</strong>.
+        The line dataset includes a single large outlier so you can see the y-axis range stay wide even when the outlier is not selected by the sampler.
+      </div>
+    </section>
+
+    <section class="charts">
+      <div class="chart-shell">
+        <div id="chart-line" class="chart"></div>
+        <div id="error" class="error" style="display:none;"></div>
+      </div>
+      <div class="chart-shell">
+        <div id="chart-scatter" class="chart"></div>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
