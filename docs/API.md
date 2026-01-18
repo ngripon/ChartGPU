@@ -506,6 +506,8 @@ Shader sources: [`line.wgsl`](../src/shaders/line.wgsl) and [`area.wgsl`](../src
 
 Bar renderer implementation: [`createBarRenderer.ts`](../src/renderers/createBarRenderer.ts). Shader source: [`bar.wgsl`](../src/shaders/bar.wgsl) (instanced rectangle expansion; per-instance `vec4<f32>(x, y, width, height)`; intended draw call uses 6 vertices per instance for 2 triangles).
 
+Pie slice shader source: [`pie.wgsl`](../src/shaders/pie.wgsl) (instanced quad + SDF mask for pie/donut slices; currently not wired into [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts)).
+
 #### Scatter renderer (internal / contributor notes)
 
 An instanced scatter circle renderer factory lives in [`createScatterRenderer.ts`](../src/renderers/createScatterRenderer.ts). It uses [`scatter.wgsl`](../src/shaders/scatter.wgsl) to expand a point instance into a quad in the vertex stage and render an anti-aliased circle in the fragment stage.
@@ -599,7 +601,7 @@ Hover highlight behavior is orchestrated by the render coordinator in [`createRe
 Notes:
 
 - **Scatter point symbol shader**: [`scatter.wgsl`](../src/shaders/scatter.wgsl) expands instanced points into quads in the vertex stage and draws anti-aliased circles in the fragment stage using an SDF + `smoothstep`. It expects per-instance `center` + `radiusPx`, plus uniforms for `transform`, `viewportPx`, and `color` (see the shader source).
-- **Example shader compilation smoke-check**: the hello-world example imports `line.wgsl`, `area.wgsl`, and `scatter.wgsl` via `?raw` and (when supported) uses `GPUShaderModule.getCompilationInfo()` to fail fast on shader compilation errors. See [`examples/hello-world/main.ts`](../examples/hello-world/main.ts).
+- **Example shader compilation smoke-check**: the hello-world example imports `line.wgsl`, `area.wgsl`, `scatter.wgsl`, and `pie.wgsl` via `?raw` and (when supported) uses `GPUShaderModule.getCompilationInfo()` to fail fast on shader compilation errors. See [`examples/hello-world/main.ts`](../examples/hello-world/main.ts).
 - **Render target format**: a renderer pipeline’s target format must match the render pass color attachment format (otherwise WebGPU raises a pipeline/attachment format mismatch validation error). `createAxisRenderer`, `createGridRenderer`, and `createLineRenderer` each accept `options.targetFormat` (typically `GPUContextState.preferredFormat`) and default to `'bgra8unorm'` for backward compatibility.
 - **Scale output space**: `prepare(...)` treats scales as affine and uses `scale(...)` samples to build a clip-space transform. Scales that output pixels (or non-linear scales) will require a different transform strategy.
 - **Line width and alpha**: line primitives are effectively 1px-class across implementations; wide lines require triangle-based extrusion. `createLineRenderer` enables standard alpha blending so `lineStyle.opacity` composites as expected.

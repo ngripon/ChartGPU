@@ -109,7 +109,7 @@ Chart instances also render a built-in hover highlight ring when the pointer is 
 
 Chart instances expose event listeners via `on()` and `off()` methods for handling clicks, hover interactions, and crosshair syncing (`'click'`, `'mouseover'`, `'mouseout'`, `'crosshairMove'`). See [`API.md`](./API.md#event-handling) for event handling documentation (note that `'crosshairMove'` uses a minimal payload `{ x, source? }` and is emitted for both pointer-driven and programmatic interaction-x updates).
 
-The `hello-world` example demonstrates continuous rendering by animating the clear color through the full color spectrum, proving that the render loop is working correctly. See [hello-world/main.ts](../examples/hello-world/main.ts) for implementation.
+The `hello-world` example demonstrates continuous rendering by animating the clear color through the full color spectrum, proving that the render loop is working correctly. It also includes an example-only WGSL compilation smoke-check via `GPUShaderModule.getCompilationInfo()` for several shaders; see [hello-world/main.ts](../examples/hello-world/main.ts) for implementation.
 
 The `basic-line` example demonstrates line series configuration (including a filled line series via `areaStyle`) and axis titles via `AxisConfig.name` (`xAxis.name` / `yAxis.name`). See [basic-line/main.ts](../examples/basic-line/main.ts).
 
