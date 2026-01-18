@@ -403,6 +403,17 @@ See [`createHoverState.ts`](../src/interaction/createHoverState.ts).
 - **Listener management**: `onChange(callback)` returns an unsubscribe function; emissions iterate a snapshot of listeners so subscription changes during emit don’t affect the current flush.
 - **Lifecycle**: `HoverState` includes an optional `destroy?: () => void`; `createHoverState()` currently returns a `destroy()` implementation that cancels any pending debounce timer and clears all listeners/state.
 
+#### Zoom state manager (internal)
+
+See [`createZoomState.ts`](../src/interaction/createZoomState.ts).
+
+- **Factory**: `createZoomState(initialStart: number, initialEnd: number): ZoomState`
+- **Purpose**: tracks a zoom window in percent space as `{ start, end }` in \([0, 100]\) and notifies listeners when it changes.
+- **Clamping**: `start` / `end` are clamped to \([0, 100]\) and ordered (`start <= end`).
+- **Span constraints**: `minSpan` / `maxSpan` are enforced (currently internal defaults); when a span clamp is required during zooming, the zoom anchor is preserved as much as possible.
+- **Pan**: `pan(delta)` shifts the window by percent points while preserving span (clamped to bounds).
+- **Listener management**: `onChange(callback)` returns an unsubscribe function; emissions iterate a snapshot of listeners so subscription changes during emit don’t affect the current emission.
+
 #### Nearest point detection (internal)
 
 See [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts).
