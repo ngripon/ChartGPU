@@ -67,6 +67,22 @@ export interface RenderCoordinator {
    * Returns an unsubscribe function.
    */
   onInteractionXChange(callback: (x: number | null, source?: unknown) => void): () => void;
+  /**
+   * Returns the current percent-space zoom window (or `null` when zoom is disabled).
+   */
+  getZoomRange(): Readonly<{ start: number; end: number }> | null;
+  /**
+   * Sets the percent-space zoom window.
+   *
+   * No-op when zoom is disabled.
+   */
+  setZoomRange(start: number, end: number): void;
+  /**
+   * Subscribes to zoom window changes (percent space).
+   *
+   * Returns an unsubscribe function.
+   */
+  onZoomRangeChange(cb: (range: Readonly<{ start: number; end: number }>) => void): () => void;
   render(): void;
   dispose(): void;
 }
@@ -575,19 +591,30 @@ export function createRenderCoordinator(
   let zoomState: ZoomState | null = null;
   let insideZoom: ReturnType<typeof createInsideZoom> | null = null;
   let unsubscribeZoom: (() => void) | null = null;
+  let lastOptionsZoomRange: Readonly<{ start: number; end: number }> | null = null;
+  const zoomRangeListeners = new Set<(range: Readonly<{ start: number; end: number }>) => void>();
 
-  const getInsideZoomConfig = (
+  const emitZoomRange = (range: Readonly<{ start: number; end: number }>): void => {
+    const snapshot = Array.from(zoomRangeListeners);
+    for (const cb of snapshot) cb(range);
+  };
+
+  const getZoomOptionsConfig = (
     opts: ResolvedChartGPUOptions
-  ): { readonly start: number; readonly end: number } | null => {
-    const cfg = opts.dataZoom?.find((z) => z?.type === 'inside');
+  ): { readonly start: number; readonly end: number; readonly hasInside: boolean } | null => {
+    // Zoom is enabled when *either* inside or slider exists. A single shared percent-space
+    // window is used for both.
+    const insideCfg = opts.dataZoom?.find((z) => z?.type === 'inside');
+    const sliderCfg = opts.dataZoom?.find((z) => z?.type === 'slider');
+    const cfg = insideCfg ?? sliderCfg;
     if (!cfg) return null;
     const start = Number.isFinite(cfg.start) ? cfg.start! : 0;
     const end = Number.isFinite(cfg.end) ? cfg.end! : 100;
-    return { start, end };
+    return { start, end, hasInside: !!insideCfg };
   };
 
-  const updateInsideZoom = (): void => {
-    const cfg = getInsideZoomConfig(currentOptions);
+  const updateZoom = (): void => {
+    const cfg = getZoomOptionsConfig(currentOptions);
 
     if (!cfg) {
       insideZoom?.dispose();
@@ -595,29 +622,43 @@ export function createRenderCoordinator(
       unsubscribeZoom?.();
       unsubscribeZoom = null;
       zoomState = null;
+      lastOptionsZoomRange = null;
       return;
     }
 
-    if (zoomState) {
-      // Sync range if config changed
-      const currentRange = zoomState.getRange();
-      if (currentRange.start !== cfg.start || currentRange.end !== cfg.end) {
-        zoomState.setRange(cfg.start, cfg.end);
-        // onChange subscription will trigger requestRender()
+    if (!zoomState) {
+      zoomState = createZoomState(cfg.start, cfg.end);
+      lastOptionsZoomRange = { start: cfg.start, end: cfg.end };
+      unsubscribeZoom = zoomState.onChange((range) => {
+        requestRender();
+        // Ensure listeners get a stable readonly object.
+        emitZoomRange({ start: range.start, end: range.end });
+      });
+    } else if (
+      lastOptionsZoomRange == null ||
+      lastOptionsZoomRange.start !== cfg.start ||
+      lastOptionsZoomRange.end !== cfg.end
+    ) {
+      // Only apply option-provided start/end when:
+      // - zoom is first created, or
+      // - start/end actually changed in options
+      zoomState.setRange(cfg.start, cfg.end);
+      lastOptionsZoomRange = { start: cfg.start, end: cfg.end };
+    }
+
+    // Only enable inside zoom handler when `{ type: 'inside' }` exists.
+    if (cfg.hasInside) {
+      if (!insideZoom) {
+        insideZoom = createInsideZoom(eventManager, zoomState);
+        insideZoom.enable();
       }
-      return;
+    } else {
+      insideZoom?.dispose();
+      insideZoom = null;
     }
-
-    zoomState = createZoomState(cfg.start, cfg.end);
-    unsubscribeZoom = zoomState.onChange(() => {
-      requestRender();
-    });
-
-    insideZoom = createInsideZoom(eventManager, zoomState);
-    insideZoom.enable();
   };
 
-  updateInsideZoom();
+  updateZoom();
 
   const areaRenderers: Array<ReturnType<typeof createAreaRenderer>> = [];
   const lineRenderers: Array<ReturnType<typeof createLineRenderer>> = [];
@@ -678,7 +719,7 @@ export function createRenderCoordinator(
     assertNotDisposed();
     currentOptions = resolvedOptions;
     legend?.update(resolvedOptions.series, resolvedOptions.theme);
-    updateInsideZoom();
+    updateZoom();
 
     // Tooltip enablement may change at runtime.
     if (overlayContainer) {
@@ -1256,6 +1297,8 @@ export function createRenderCoordinator(
     unsubscribeZoom?.();
     unsubscribeZoom = null;
     zoomState = null;
+    lastOptionsZoomRange = null;
+    zoomRangeListeners.clear();
 
     eventManager.dispose();
     crosshairRenderer.dispose();
@@ -1323,6 +1366,35 @@ export function createRenderCoordinator(
     };
   };
 
-  return { setOptions, getInteractionX, setInteractionX, onInteractionXChange, render, dispose };
+  const getZoomRange: RenderCoordinator['getZoomRange'] = () => {
+    return zoomState?.getRange() ?? null;
+  };
+
+  const setZoomRange: RenderCoordinator['setZoomRange'] = (start, end) => {
+    assertNotDisposed();
+    if (!zoomState) return;
+    zoomState.setRange(start, end);
+    // onChange will requestRender + emit.
+  };
+
+  const onZoomRangeChange: RenderCoordinator['onZoomRangeChange'] = (cb) => {
+    assertNotDisposed();
+    zoomRangeListeners.add(cb);
+    return () => {
+      zoomRangeListeners.delete(cb);
+    };
+  };
+
+  return {
+    setOptions,
+    getInteractionX,
+    setInteractionX,
+    onInteractionXChange,
+    getZoomRange,
+    setZoomRange,
+    onZoomRangeChange,
+    render,
+    dispose,
+  };
 }
 

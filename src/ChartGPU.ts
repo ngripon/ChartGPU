@@ -4,6 +4,9 @@ import type { RenderCoordinator } from './core/createRenderCoordinator';
 import { resolveOptions } from './config/OptionResolver';
 import type { ResolvedChartGPUOptions, ResolvedPieSeriesConfig } from './config/OptionResolver';
 import type { ChartGPUOptions, DataPoint, DataPointTuple, PieCenter, PieRadius } from './config/types';
+import { createDataZoomSlider } from './components/createDataZoomSlider';
+import type { DataZoomSlider } from './components/createDataZoomSlider';
+import type { ZoomRange, ZoomState } from './interaction/createZoomState';
 import { findNearestPoint } from './interaction/findNearestPoint';
 import type { NearestPointMatch } from './interaction/findNearestPoint';
 import { findPieSlice } from './interaction/findPieSlice';
@@ -43,6 +46,16 @@ export interface ChartGPUInstance {
    * Returns an unsubscribe function.
    */
   onInteractionXChange(callback: (x: number | null, source?: unknown) => void): () => void;
+  /**
+   * Returns the current percent-space zoom window (or `null` when zoom is disabled).
+   */
+  getZoomRange(): Readonly<{ start: number; end: number }> | null;
+  /**
+   * Sets the percent-space zoom window.
+   *
+   * No-op when zoom is disabled.
+   */
+  setZoomRange(start: number, end: number): void;
 }
 
 // Type-only alias so callsites can write `ChartGPU[]` for chart instances (while `ChartGPU` the value
@@ -84,11 +97,31 @@ const DEFAULT_TAP_MAX_TIME_MS = 500;
 
 type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number }>;
 
+const DATA_ZOOM_SLIDER_HEIGHT_CSS_PX = 32;
+const DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX = 8;
+const DATA_ZOOM_SLIDER_RESERVE_CSS_PX = DATA_ZOOM_SLIDER_HEIGHT_CSS_PX + DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX;
+
 const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
 
 const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } => {
   if (isTupleDataPoint(p)) return { x: p[0], y: p[1] };
   return { x: p.x, y: p.y };
+};
+
+const hasSliderDataZoom = (options: ChartGPUOptions): boolean => options.dataZoom?.some((z) => z?.type === 'slider') ?? false;
+
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+const resolveOptionsForChart = (options: ChartGPUOptions): ResolvedChartGPUOptions => {
+  const base: ResolvedChartGPUOptions = { ...resolveOptions(options), tooltip: options.tooltip };
+  if (!hasSliderDataZoom(options)) return base;
+  return {
+    ...base,
+    grid: {
+      ...base.grid,
+      bottom: base.grid.bottom + DATA_ZOOM_SLIDER_RESERVE_CSS_PX,
+    },
+  };
 };
 
 type InteractionScalesCache = {
@@ -251,11 +284,11 @@ export async function createChartGPU(
   let coordinatorTargetFormat: GPUTextureFormat | null = null;
   let unsubscribeCoordinatorInteractionXChange: (() => void) | null = null;
 
+  let dataZoomSliderHost: HTMLDivElement | null = null;
+  let dataZoomSlider: DataZoomSlider | null = null;
+
   let currentOptions: ChartGPUOptions = options;
-  let resolvedOptions: ResolvedChartGPUOptions = {
-    ...resolveOptions(currentOptions),
-    tooltip: currentOptions.tooltip,
-  };
+  let resolvedOptions: ResolvedChartGPUOptions = resolveOptionsForChart(currentOptions);
 
   // Cache global bounds and interaction scales; avoids O(N) data scans per pointer move.
   let cachedGlobalBounds: Bounds = computeGlobalBounds(resolvedOptions.series);
@@ -308,6 +341,113 @@ export async function createChartGPU(
     }
   };
 
+  const disposeDataZoomSlider = (): void => {
+    dataZoomSlider?.dispose();
+    dataZoomSlider = null;
+  };
+
+  const disposeDataZoomSliderHost = (): void => {
+    dataZoomSliderHost?.remove();
+    dataZoomSliderHost = null;
+  };
+
+  const disposeDataZoomUi = (): void => {
+    disposeDataZoomSlider();
+    disposeDataZoomSliderHost();
+  };
+
+  const ensureDataZoomSliderHost = (): HTMLDivElement => {
+    if (dataZoomSliderHost) return dataZoomSliderHost;
+
+    // Ensure the host's absolute positioning is anchored to the chart container.
+    // If the container is already positioned, avoid overwriting user styles.
+    try {
+      const pos = window.getComputedStyle(container).position;
+      if (pos === 'static') container.style.position = 'relative';
+    } catch {
+      // best-effort
+    }
+
+    const host = document.createElement('div');
+    host.style.position = 'absolute';
+    host.style.left = '0';
+    host.style.right = '0';
+    host.style.bottom = '0';
+    host.style.height = `${DATA_ZOOM_SLIDER_RESERVE_CSS_PX}px`;
+    host.style.paddingTop = `${DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX}px`;
+    host.style.boxSizing = 'border-box';
+    host.style.pointerEvents = 'auto';
+    host.style.zIndex = '5';
+    container.appendChild(host);
+    dataZoomSliderHost = host;
+    return host;
+  };
+
+  const computeZoomInOutAnchorRatio = (range: ZoomRange, center: number): number => {
+    const span = range.end - range.start;
+    if (!Number.isFinite(span) || span === 0) return 0.5;
+    return clamp((center - range.start) / span, 0, 1);
+  };
+
+  const createCoordinatorZoomStateLike = (): ZoomState => {
+    const getRange: ZoomState['getRange'] = () => coordinator?.getZoomRange() ?? { start: 0, end: 100 };
+    const setRange: ZoomState['setRange'] = (start, end) => {
+      coordinator?.setZoomRange(start, end);
+    };
+    const zoomIn: ZoomState['zoomIn'] = (center, factor) => {
+      if (!Number.isFinite(center) || !Number.isFinite(factor) || factor <= 1) return;
+      const r = coordinator?.getZoomRange();
+      if (!r) return;
+      const c = clamp(center, 0, 100);
+      const ratio = computeZoomInOutAnchorRatio(r, c);
+      const span = r.end - r.start;
+      const nextSpan = span / factor;
+      const nextStart = c - ratio * nextSpan;
+      coordinator?.setZoomRange(nextStart, nextStart + nextSpan);
+    };
+    const zoomOut: ZoomState['zoomOut'] = (center, factor) => {
+      if (!Number.isFinite(center) || !Number.isFinite(factor) || factor <= 1) return;
+      const r = coordinator?.getZoomRange();
+      if (!r) return;
+      const c = clamp(center, 0, 100);
+      const ratio = computeZoomInOutAnchorRatio(r, c);
+      const span = r.end - r.start;
+      const nextSpan = span * factor;
+      const nextStart = c - ratio * nextSpan;
+      coordinator?.setZoomRange(nextStart, nextStart + nextSpan);
+    };
+    const pan: ZoomState['pan'] = (delta) => {
+      if (!Number.isFinite(delta)) return;
+      const r = coordinator?.getZoomRange();
+      if (!r) return;
+      coordinator?.setZoomRange(r.start + delta, r.end + delta);
+    };
+    const onChange: ZoomState['onChange'] = (callback) => coordinator?.onZoomRangeChange(callback) ?? (() => {});
+
+    return { getRange, setRange, zoomIn, zoomOut, pan, onChange };
+  };
+
+  const syncDataZoomUi = (): void => {
+    const shouldHaveSlider = hasSliderDataZoom(currentOptions);
+    if (!shouldHaveSlider) {
+      disposeDataZoomUi();
+      return;
+    }
+
+    // Slider requires a coordinator-backed zoom state.
+    if (!coordinator) return;
+    if (!coordinator.getZoomRange()) return;
+
+    const host = ensureDataZoomSliderHost();
+    if (!dataZoomSlider) {
+      dataZoomSlider = createDataZoomSlider(host, createCoordinatorZoomStateLike(), {
+        height: DATA_ZOOM_SLIDER_HEIGHT_CSS_PX,
+        marginTop: 0, // host provides vertical spacing
+      });
+    }
+    dataZoomSlider.update(resolvedOptions.theme);
+  };
+
   const bindCoordinatorInteractionXChange = (): void => {
     unbindCoordinatorInteractionXChange();
     if (disposed) return;
@@ -322,11 +462,18 @@ export async function createChartGPU(
     if (disposed) return;
     if (!gpuContext || !gpuContext.initialized) return;
 
+    const prevZoomRange = coordinator?.getZoomRange() ?? null;
+
     unbindCoordinatorInteractionXChange();
+    // Coordinator recreation invalidates zoom subscriptions; recreate the slider if present.
+    disposeDataZoomSlider();
     coordinator?.dispose();
     coordinator = createRenderCoordinator(gpuContext, resolvedOptions, { onRequestRender: requestRender });
     coordinatorTargetFormat = gpuContext.preferredFormat;
     bindCoordinatorInteractionXChange();
+
+    if (prevZoomRange) coordinator.setZoomRange(prevZoomRange.start, prevZoomRange.end);
+    syncDataZoomUi();
   };
 
   const resizeInternal = (shouldRequestRenderAfterChanges: boolean): void => {
@@ -673,6 +820,7 @@ export async function createChartGPU(
     try {
       // Requirement: dispose order: cancel RAF, coordinator.dispose(), gpuContext.destroy(), remove canvas.
       cancelPendingFrame();
+      disposeDataZoomUi();
       unbindCoordinatorInteractionXChange();
       coordinator?.dispose();
       coordinator = null;
@@ -711,10 +859,11 @@ export async function createChartGPU(
     setOption(nextOptions) {
       if (disposed) return;
       currentOptions = nextOptions;
-      resolvedOptions = { ...resolveOptions(nextOptions), tooltip: nextOptions.tooltip };
+      resolvedOptions = resolveOptionsForChart(nextOptions);
       coordinator?.setOptions(resolvedOptions);
       cachedGlobalBounds = computeGlobalBounds(resolvedOptions.series);
       interactionScalesCache = null;
+      syncDataZoomUi();
 
       // Requirement: setOption triggers a render (and thus series parsing/extent/scales update inside render).
       requestRender();
@@ -744,6 +893,14 @@ export async function createChartGPU(
       if (disposed) return () => {};
       return coordinator?.onInteractionXChange(callback) ?? (() => {});
     },
+    getZoomRange() {
+      if (disposed) return null;
+      return coordinator?.getZoomRange() ?? null;
+    },
+    setZoomRange(start, end) {
+      if (disposed) return;
+      coordinator?.setZoomRange(start, end);
+    },
   };
 
   try {
@@ -765,6 +922,9 @@ export async function createChartGPU(
 
     // Requirement: after GPUContext is initialized, create RenderCoordinator with resolved options.
     recreateCoordinator();
+
+    // Mount data-zoom UI (if configured).
+    syncDataZoomUi();
 
     // Kick an initial render.
     requestRender();

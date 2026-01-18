@@ -117,11 +117,14 @@ const createOptions = (
   const xMax = last ? getX(last) : xMin + 1;
 
   return {
-    grid: { left: 70, right: 24, top: 24, bottom: 56 },
+    // Note: when `dataZoom` includes `{ type: 'slider' }`, ChartGPU reserves additional bottom
+    // space internally for the slider UI, so this value only needs to cover axis labels/title.
+    grid: { left: 70, right: 24, top: 24, bottom: 40 },
     xAxis: { type: 'time', min: xMin, max: xMax, name: 'Time' },
     yAxis: { type: 'value', name: title },
     palette,
     tooltip: { trigger: 'axis', formatter: axisTooltipFormatter },
+    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
     series: [
       {
         type: 'line',
