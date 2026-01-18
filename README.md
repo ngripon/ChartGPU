@@ -33,6 +33,8 @@ Chart instances render on demand. `ChartGPU.create(...)` schedules an initial re
 
 `setOption(...)` resolves the provided options against defaults via [`resolveOptions`](src/config/OptionResolver.ts) and applies the resolved result to the internal render coordinator. The per-frame work (series data upload, bounds/extents, and clip-space scales) happens inside [`createRenderCoordinator.ts`](src/core/createRenderCoordinator.ts) during `RenderCoordinator.render()`.
 
+ChartGPU also listens to pointer events on the canvas via an internal event manager to drive an internal crosshair overlay. Pointer movement may schedule on-demand renders (coalesced) so the crosshair stays in sync. This behavior is currently internal and not configurable via `ChartGPUOptions`; see [`createRenderCoordinator.ts`](src/core/createRenderCoordinator.ts), [`createEventManager.ts`](src/interaction/createEventManager.ts), and [`createCrosshairRenderer.ts`](src/renderers/createCrosshairRenderer.ts).
+
 ### Options and defaults
 
 Options are defined by [`ChartGPUOptions`](src/config/types.ts). Baseline defaults live in [`defaultOptions`](src/config/defaults.ts).
@@ -43,6 +45,7 @@ Options are defined by [`ChartGPUOptions`](src/config/types.ts). Baseline defaul
 - **Palette / series colors**: `ChartGPUOptions.palette` overrides the resolved theme palette (`resolvedOptions.theme.colorPalette`), and default series colors come from `resolvedOptions.theme.colorPalette[i % ...]` when `series[i].color` is missing. Theme also drives background/grid/axis colors during rendering; see [`createRenderCoordinator.ts`](src/core/createRenderCoordinator.ts).
 - **Data points**: `series[i].data` accepts `DataPoint` as either a tuple (`[x, y]`) or an object (`{ x, y }`). See [`types.ts`](src/config/types.ts).
 - **Series types**: `SeriesType` is `'line' | 'area'`, and `series` is a discriminated union (`LineSeriesConfig | AreaSeriesConfig`). Area series support `baseline?: number` (defaults to the y-axis minimum when omitted) and `areaStyle?: { opacity?: number }`. Line series can also include `areaStyle?: { opacity?: number }` to render a filled area behind the line (area fills then line strokes). See [`types.ts`](src/config/types.ts), [`createRenderCoordinator.ts`](src/core/createRenderCoordinator.ts), and [`examples/basic-line/main.ts`](examples/basic-line/main.ts).
+- **Tooltip configuration (type definitions)**: `ChartGPUOptions.tooltip?: TooltipConfig` supports `trigger?: 'item' | 'axis'` and `formatter?: (params: TooltipParams | TooltipParams[]) => string`. `TooltipParams` includes `seriesName`, `seriesIndex`, `dataIndex`, `value`, and `color`. See [`types.ts`](src/config/types.ts). Note: tooltip config types are defined, but ChartGPU does not yet wire them into the render coordinator. Contributors can use the internal DOM tooltip overlay helper [`createTooltip.ts`](src/components/createTooltip.ts) (not exported from `src/index.ts`); see [`docs/API.md`](docs/API.md).
 
 To resolve user options against defaults, use [`OptionResolver.resolve(...)`](src/config/OptionResolver.ts) (or [`resolveOptions(...)`](src/config/OptionResolver.ts)). This merges user-provided values with defaults and returns resolved options.
 
@@ -141,6 +144,8 @@ For a concrete reference renderer, see [`createLineRenderer.ts`](src/renderers/c
 - issues a simple `line-strip` draw in `render(...)`
 
 The associated shader lives in [`line.wgsl`](src/shaders/line.wgsl).
+
+For a crosshair overlay renderer reference, see the internal [`createCrosshairRenderer.ts`](src/renderers/createCrosshairRenderer.ts) and its shader [`crosshair.wgsl`](src/shaders/crosshair.wgsl). (This renderer is currently internal and not exported from `src/index.ts`; contributor notes live in [`docs/API.md`](docs/API.md).)
 
 **WGSL imports (Contributor notes):** WGSL is imported as a raw string via Vite’s `?raw` query (e.g. `*.wgsl?raw`). TypeScript support for this pattern is provided by [`wgsl-raw.d.ts`](src/wgsl-raw.d.ts).
 

@@ -99,6 +99,12 @@ See the [examples directory](../examples/) for complete working examples.
 
 Chart instances also mount an internal legend panel by default (series swatches + names) alongside the canvas. Series labels come from `series[i].name` (trimmed), falling back to `Series N`; see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and the internal [`createLegend.ts`](../src/components/createLegend.ts).
 
+Chart instances can also show an internal HTML tooltip overlay on hover when `ChartGPUOptions.tooltip.show !== false`; see the tooltip option types in [`types.ts`](../src/config/types.ts) and tooltip behavior notes in [`API.md`](./API.md#tooltip-configuration-type-definitions).
+
+Chart instances also render a built-in hover highlight ring when the pointer is inside the plot grid and a nearest data point can be determined; this is part of the internal render pipeline in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) (see hover highlight notes in [`API.md`](./API.md#highlight-renderer-internal--contributor-notes)).
+
+Chart instances expose event listeners via `on()` and `off()` methods for handling clicks and hover interactions (`'click'`, `'mouseover'`, `'mouseout'`). See [`API.md`](./API.md#event-handling) for event handling documentation.
+
 The `hello-world` example demonstrates continuous rendering by animating the clear color through the full color spectrum, proving that the render loop is working correctly. See [hello-world/main.ts](../examples/hello-world/main.ts) for implementation.
 
 The `basic-line` example demonstrates line series configuration (including a filled line series via `areaStyle`) and axis titles via `AxisConfig.name` (`xAxis.name` / `yAxis.name`). See [basic-line/main.ts](../examples/basic-line/main.ts).

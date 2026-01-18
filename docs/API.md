@@ -24,8 +24,38 @@ See [ChartGPU.ts](../src/ChartGPU.ts) for the full interface and lifecycle behav
 - `setOption(options: ChartGPUOptions): void`: replaces the current user options, resolves them against defaults via [`resolveOptions`](../src/config/OptionResolver.ts), updates internal render state, and schedules a single on-demand render on the next `requestAnimationFrame` tick (coalesces multiple calls).
 - `resize(): void`: recomputes the canvas backing size / WebGPU canvas configuration from the container size; if anything changes, schedules a render.
 - `dispose(): void`: cancels any pending frame, disposes internal render resources, destroys the WebGPU context, and removes the canvas.
+- `on(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void`: registers an event listener. See [Event handling](#event-handling) below.
+- `off(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void`: unregisters an event listener. See [Event handling](#event-handling) below.
 
 Data upload and scale/bounds derivation occur during [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) `RenderCoordinator.render()` (not during `setOption(...)` itself).
+
+**Event handling:**
+
+Chart instances expose `on()` and `off()` methods for subscribing to user interaction events. See [ChartGPU.ts](../src/ChartGPU.ts) for the implementation.
+
+- **`on(eventName, callback): void`**: registers a callback for the specified event name. Callbacks are stored in a closure and persist until explicitly removed via `off()` or until the instance is disposed.
+- **`off(eventName, callback): void`**: removes a previously registered callback. Safe to call even if the callback was never registered or was already removed.
+
+**Supported events:**
+
+- **`'click'`**: fires on tap/click gestures (mouse left-click, touch tap, pen tap). When you register a click listener via `on('click', ...)`, it fires whenever a click occurs on the canvas, even if not on a data point. For clicks not on a data point, the callback receives `seriesIndex: null`, `dataIndex: null`, `value: null`, and `seriesName: null`, but includes the original `PointerEvent` as `event`.
+- **`'mouseover'`**: fires when the pointer enters a data point (or transitions from one data point to another). Only fires when listeners are registered (`on('mouseover', ...)` or `on('mouseout', ...)`).
+- **`'mouseout'`**: fires when the pointer leaves a data point (or transitions from one data point to another). Only fires when listeners are registered (`on('mouseover', ...)` or `on('mouseout', ...)`).
+
+**Event callback payload:**
+
+All callbacks receive a `ChartGPUEventPayload` object with:
+- `seriesIndex: number | null`: zero-based series index, or `null` if not on a data point
+- `dataIndex: number | null`: zero-based data point index within the series, or `null` if not on a data point
+- `value: readonly [number, number] | null`: data point coordinates `[x, y]`, or `null` if not on a data point
+- `seriesName: string | null`: series name from `series[i].name` (trimmed), or `null` if not on a data point or name is empty
+- `event: PointerEvent`: the original browser `PointerEvent` for access to client coordinates, timestamps, etc.
+
+**Behavioral notes:**
+
+- Click events fire when you have registered a click listener via `on('click', ...)`. For clicks not on a data point, point-related fields (`seriesIndex`, `dataIndex`, `value`, `seriesName`) are `null`, but `event` always contains the original `PointerEvent`.
+- Hover events (`mouseover` / `mouseout`) only fire when at least one hover listener is registered. They fire on transitions: `mouseover` when entering a data point (or moving between points), `mouseout` when leaving a data point (or moving between points).
+- All event listeners are automatically cleaned up when `dispose()` is called. No manual cleanup required.
 
 **Legend (automatic):**
 
@@ -60,6 +90,18 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 - **`AxisConfig`**: configuration for `xAxis` / `yAxis`. See [`types.ts`](../src/config/types.ts).
 - **`AxisConfig.name?: string`**: renders an axis title when provided (and non-empty after `trim()`): x-axis titles are centered below x-axis tick labels, and y-axis titles are rotated \(-90°\) and placed left of y-axis tick labels; titles can be clipped if `grid.bottom` / `grid.left` margins are too small.
 - **Axis title styling**: titles are rendered via the internal DOM text overlay and use the resolved theme’s `textColor` and `fontFamily` with slightly larger, bold text (label elements also set `dir='auto'`).
+
+**Tooltip configuration (type definitions):**
+
+- **`ChartGPUOptions.tooltip?: TooltipConfig`**: optional tooltip configuration. See [`types.ts`](../src/config/types.ts).
+- **Enablement**: when `tooltip.show !== false`, ChartGPU creates an internal DOM tooltip overlay and updates it on hover; when `tooltip.show === false`, the tooltip is not shown.
+- **Hover behavior**: tooltip updates on pointer movement within the plot grid, and hides on pointer leave.
+- **`TooltipConfig.trigger?: 'item' | 'axis'`**: tooltip trigger mode.
+- **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`).
+
+Default tooltip formatter helpers are available in [`formatTooltip.ts`](../src/components/formatTooltip.ts): `formatTooltipItem(params: TooltipParams): string` (item mode) and `formatTooltipAxis(params: TooltipParams[]): string` (axis mode). Both return HTML strings intended for the internal tooltip overlay’s `innerHTML` usage; the axis formatter includes an x header line.
+
+**Content safety (important)**: the tooltip overlay assigns `content` via `innerHTML`. Only return trusted/sanitized strings from `TooltipConfig.formatter`. See the internal tooltip overlay helper in [`createTooltip.ts`](../src/components/createTooltip.ts) and the default formatter helpers in [`formatTooltip.ts`](../src/components/formatTooltip.ts).
 
 For a working configuration (including axis titles via `AxisConfig.name` and a filled line series via `areaStyle`), see [`examples/basic-line/main.ts`](../examples/basic-line/main.ts).
 
@@ -245,6 +287,60 @@ All WebGPU types are provided by `@webgpu/types`. See [GPUContext.ts](../src/cor
 
 Chart data uploads and per-series GPU vertex buffer caching are handled by the internal `createDataStore(device)` helper. See [`createDataStore.ts`](../src/data/createDataStore.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
 
+### Interaction utilities (internal / contributor notes)
+
+Interaction helpers live in [`src/interaction/`](../src/interaction/). These modules are currently internal (not exported from the public entrypoint `src/index.ts`).
+
+#### Event manager (internal)
+
+See [`createEventManager.ts`](../src/interaction/createEventManager.ts).
+
+- **Factory**: `createEventManager(canvas: HTMLCanvasElement, initialGridArea: GridArea): EventManager`
+- **Purpose**: normalizes pointer input into chart-friendly coordinates and emits `'mousemove' | 'click' | 'mouseleave'` events.
+- **Coordinate contract (critical)**:
+  - `payload.x` / `payload.y` are **canvas-local CSS pixels** (relative to the canvas top-left in CSS px via `getBoundingClientRect()`).
+  - `payload.gridX` / `payload.gridY` are **plot-area-local CSS pixels** (canvas-local CSS px minus `GridArea` CSS-pixel margins).
+  - `payload.isInGrid` is computed in **CSS pixels** against the current plot rect.
+- **Layout updates**: `EventManager.updateGridArea(gridArea)` must be called when grid/layout changes (ChartGPU’s internal render coordinator updates it each render).
+- **Current usage**: used internally by the render coordinator to drive the crosshair overlay and to request renders in render-on-demand systems. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+
+#### Hover state manager (internal)
+
+See [`createHoverState.ts`](../src/interaction/createHoverState.ts).
+
+- **Factory**: `createHoverState(): HoverState`
+- **Purpose**: tracks the currently hovered `{ seriesIndex, dataIndex }` pair and notifies listeners when it changes.
+- **Debounce**: updates are coalesced with an internal debounce of ~16ms to avoid spamming downstream work during rapid pointer movement.
+- **Change-only notifications**: listeners fire only when the hovered target actually changes (including `null`).
+- **Listener management**: `onChange(callback)` returns an unsubscribe function; emissions iterate a snapshot of listeners so subscription changes during emit don’t affect the current flush.
+- **Lifecycle**: `HoverState` includes an optional `destroy?: () => void`; `createHoverState()` currently returns a `destroy()` implementation that cancels any pending debounce timer and clears all listeners/state.
+
+#### Nearest point detection (internal)
+
+See [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts).
+
+- **Function**: `findNearestPoint(series: ReadonlyArray<ResolvedSeriesConfig>, x: number, y: number, xScale: LinearScale, yScale: LinearScale, maxDistance?: number): NearestPointMatch | null`
+- **Returns**: `null` or `{ seriesIndex, dataIndex, point, distance }`
+- **Sorted-x requirement**: each series must be sorted by increasing `x` in domain space for the binary search path to be correct.
+- **Coordinate system contract (critical)**:
+  - `x` / `y` must be in the same units as `xScale` / `yScale` **range-space**.
+  - If you pass **grid-local CSS pixels** (e.g. `gridX` / `gridY` from [`createEventManager.ts`](../src/interaction/createEventManager.ts)), then `xScale.range(...)` / `yScale.range(...)` must also be in **CSS pixels**.
+  - If you pass **clip-space coordinates**, then the scales must also output clip space (and `maxDistance` is interpreted in clip-space units).
+- **Performance**: per-series lower-bound binary search on x with outward expansion based on x-distance pruning; uses squared distances internally and computes `sqrt` only for the final match.
+
+#### Points-at-x lookup (internal)
+
+See [`findPointsAtX.ts`](../src/interaction/findPointsAtX.ts).
+
+- **Function**: `findPointsAtX(series: ReadonlyArray<ResolvedSeriesConfig>, xValue: number, xScale: LinearScale, tolerance?: number): ReadonlyArray<PointsAtXMatch>`
+- **Return type**: `ReadonlyArray<PointsAtXMatch>` where `PointsAtXMatch = { seriesIndex, dataIndex, point }`
+- **Coordinate system contract (critical)**:
+  - `xValue` and `tolerance` MUST be in the same units as `xScale` **range-space**.
+  - Note: ChartGPU’s internal render scales are currently in clip space (NDC, typically \[-1, 1\]); in that case, convert pointer x into clip space before calling this helper.
+- **Tolerance behavior**: when `tolerance` is finite, matches with \(|xScale.scale(point.x) - xValue|\) beyond tolerance are omitted; when `tolerance` is omitted or non-finite, returns the nearest point per series when possible.
+- **Sorted-x requirement**: each series must be sorted by increasing `x` in domain space for the binary search path to be correct.
+- **NaN-x fallback**: if a series contains any `NaN` x values, this helper falls back to an O(n) scan for correctness (NaN breaks total ordering for binary search).
+
 ### Text overlay (internal / contributor notes)
 
 An internal DOM helper for rendering text labels above the canvas using an absolutely-positioned HTML overlay. See [`createTextOverlay.ts`](../src/components/createTextOverlay.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
@@ -268,13 +364,31 @@ An internal DOM helper for rendering a series legend (color swatch + series name
   - `dispose(): void`
 - **Current usage**: created and updated by the render coordinator (default position `'right'`). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 
+### Tooltip overlay (internal / contributor notes)
+
+An internal DOM helper for rendering an HTML tooltip above the canvas. See [`createTooltip.ts`](../src/components/createTooltip.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`).
+
+- **Factory**: `createTooltip(container: HTMLElement): Tooltip`
+- **`Tooltip` methods (essential)**:
+  - `show(x: number, y: number, content: string): void`
+  - `hide(): void`
+  - `dispose(): void`
+- **Coordinates**: `x` / `y` are in CSS pixels relative to the container’s top-left corner (container-local CSS px).
+- **Positioning behavior**: positions the tooltip near the cursor with flip/clamp logic so it stays within the container bounds.
+- **Content**: `content` is treated as HTML and assigned via `innerHTML`. Only pass trusted/sanitized strings.
+- **Pointer events**: the tooltip uses `pointer-events: none` so it won’t intercept mouse/touch input.
+
+For default `innerHTML`-safe tooltip content formatting helpers (item + axis trigger modes), see [`formatTooltip.ts`](../src/components/formatTooltip.ts).
+
 ### Render coordinator (internal / contributor notes)
 
 A small orchestration layer for “resolved options → render pass submission”.
 
 See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) for the complete implementation (including `GPUContextLike` and `RenderCoordinator` types).
 
-- **Factory**: `createRenderCoordinator(gpuContext: GPUContextLike, options: ResolvedChartGPUOptions): RenderCoordinator`
+- **Factory**: `createRenderCoordinator(gpuContext: GPUContextLike, options: ResolvedChartGPUOptions, callbacks?: RenderCoordinatorCallbacks): RenderCoordinator`
+
+- **Callbacks (optional)**: `RenderCoordinatorCallbacks` currently supports `onRequestRender?: () => void` for render-on-demand integration (e.g. schedule a render on pointer-driven interaction state changes). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 
 **`RenderCoordinator` methods (essential):**
 
@@ -286,7 +400,9 @@ See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) for t
 
 - **Layout**: computes `GridArea` from resolved grid margins and canvas size.
 - **Scales**: derives `xScale`/`yScale` in clip space; respects explicit axis `min`/`max` overrides and otherwise falls back to global series bounds.
-- **Orchestration order**: clear → grid → area fills → line strokes → axes.
+- **Orchestration order**: clear → grid → area fills → line strokes → hover highlight → axes → crosshair.
+- **Interaction overlays (internal)**: the render coordinator creates an internal [event manager](#event-manager-internal), an internal [crosshair renderer](#crosshair-renderer-internal--contributor-notes), and an internal [highlight renderer](#highlight-renderer-internal--contributor-notes). Pointer `mousemove`/`mouseleave` updates interaction state and toggles overlay visibility; when provided, `callbacks.onRequestRender?.()` is used so pointer movement schedules renders in render-on-demand systems (e.g. `ChartGPU`).
+- **Pointer coordinate contract (high-level)**: the crosshair `prepare(...)` path expects **canvas-local CSS pixels** (`EventManager` payload `x`/`y`). See [`createEventManager.ts`](../src/interaction/createEventManager.ts) and [`createCrosshairRenderer.ts`](../src/renderers/createCrosshairRenderer.ts).
 - **Target format**: uses `gpuContext.preferredFormat` (fallback `'bgra8unorm'`) for renderer pipelines; must match the render pass color attachment format.
 - **Theme application (essential)**: see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
   - Background clear uses `resolvedOptions.theme.backgroundColor`.
@@ -354,6 +470,42 @@ A minimal axis (baseline + ticks) renderer factory lives in [`createAxisRenderer
   - **Tick labels**: numeric tick value labels are rendered for each tick mark (label count matches tick count). The current tick count is fixed at 5; see [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
   - **Tick length**: `AxisConfig.tickLength` is in CSS pixels (default: 6).
   - **Baseline vs ticks**: the baseline and tick segments can be styled with separate colors (`axisLineColor` vs `axisTickColor`).
+
+#### Crosshair renderer (internal / contributor notes)
+
+A crosshair overlay renderer factory lives in [`createCrosshairRenderer.ts`](../src/renderers/createCrosshairRenderer.ts). It is currently internal (not exported from the public entrypoint `src/index.ts`).
+
+- **`createCrosshairRenderer(device: GPUDevice, options?: CrosshairRendererOptions): CrosshairRenderer`**
+- **`CrosshairRendererOptions.targetFormat?: GPUTextureFormat`**: must match the render pass color attachment format (typically `GPUContextState.preferredFormat`). Defaults to `'bgra8unorm'` for backward compatibility.
+- **`CrosshairRenderer.prepare(x: number, y: number, gridArea: GridArea, options: CrosshairRenderOptions): void`**
+  - **Coordinate contract (critical)**:
+    - `x` / `y` are **canvas-local CSS pixels** (e.g. pointer coordinates produced by [`createEventManager.ts`](../src/interaction/createEventManager.ts)).
+    - `gridArea` margins (`left/right/top/bottom`) are **CSS pixels**, while `gridArea.canvasWidth` / `gridArea.canvasHeight` are **device pixels**.
+  - **Clipping**: the renderer computes a scissor rect for the plot area (in device pixels) and clips the crosshair to it; `render(...)` resets scissor to the full canvas after drawing.
+  - **Line width (best-effort)**: `options.lineWidth` is in CSS pixels; thickness is approximated by drawing multiple parallel 1px lines in device-pixel offsets (clamped to a small deterministic maximum).
+  - **Dash fallback**: segments are CPU-generated into a `line-list` vertex buffer to approximate a dashed line; if segmentation would exceed a hard vertex cap, it falls back to a single solid segment per enabled axis.
+- **`CrosshairRenderer.render(passEncoder: GPURenderPassEncoder): void`**
+- **`CrosshairRenderer.setVisible(visible: boolean): void`**: toggles visibility without destroying GPU resources.
+- **`CrosshairRenderer.dispose(): void`**: destroys internal buffers (best-effort).
+
+- **`CrosshairRenderOptions`**: `{ showX: boolean, showY: boolean, color: string, lineWidth: number }`
+
+Shader source: [`crosshair.wgsl`](../src/shaders/crosshair.wgsl) (`line-list` pipeline; fragment outputs a uniform RGBA color with alpha blending enabled).
+
+#### Highlight renderer (internal / contributor notes)
+
+A point highlight overlay renderer factory lives in [`createHighlightRenderer.ts`](../src/renderers/createHighlightRenderer.ts). It is currently internal (not exported from the public entrypoint `src/index.ts`).
+
+- **Factory**: `createHighlightRenderer(device: GPUDevice, options?: HighlightRendererOptions): HighlightRenderer`
+- **`HighlightRenderer.prepare(point: HighlightPoint, color: string, size: number): void`**: prepares a ring highlight for a single point.
+  - **Coordinate contract (high-level)**: `HighlightPoint.centerDeviceX/centerDeviceY` are **device pixels** (same coordinate space as fragment `@builtin(position)`), `HighlightPoint.scissor` is a **device-pixel scissor rect** for the plot area, and `size` is specified in **CSS pixels** (scaled by DPR internally).
+- **`HighlightRenderer.render(passEncoder: GPURenderPassEncoder): void`**
+- **`HighlightRenderer.setVisible(visible: boolean): void`**
+- **`HighlightRenderer.dispose(): void`**
+
+Shader source: [`highlight.wgsl`](../src/shaders/highlight.wgsl) (fullscreen triangle; fragment draws a soft-edged ring around the prepared center position with alpha blending enabled).
+
+Hover highlight behavior is orchestrated by the render coordinator in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts): when the pointer is inside the plot grid, it finds the nearest data point (via [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts)) and prepares the highlight ring at that point, clipped to the plot rect; otherwise the highlight is hidden.
 
 **WGSL imports:** renderers may import WGSL as a raw string via Vite’s `?raw` query (e.g. `*.wgsl?raw`). TypeScript support for this pattern is provided by [`wgsl-raw.d.ts`](../src/wgsl-raw.d.ts).
 

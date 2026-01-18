@@ -6,13 +6,25 @@ import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
 import { createAreaRenderer } from '../renderers/createAreaRenderer';
 import { createLineRenderer } from '../renderers/createLineRenderer';
+import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
+import type { CrosshairRenderOptions } from '../renderers/createCrosshairRenderer';
+import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
+import type { HighlightPoint } from '../renderers/createHighlightRenderer';
+import { createEventManager } from '../interaction/createEventManager';
+import type { ChartGPUEventPayload } from '../interaction/createEventManager';
+import { findNearestPoint } from '../interaction/findNearestPoint';
+import { findPointsAtX } from '../interaction/findPointsAtX';
 import { createLinearScale } from '../utils/scales';
 import type { LinearScale } from '../utils/scales';
-import { parseCssColorToGPUColor } from '../utils/colors';
+import { parseCssColorToGPUColor, parseCssColorToRgba01 } from '../utils/colors';
 import { createTextOverlay } from '../components/createTextOverlay';
 import type { TextOverlay, TextOverlayAnchor } from '../components/createTextOverlay';
 import { createLegend } from '../components/createLegend';
 import type { Legend } from '../components/createLegend';
+import { createTooltip } from '../components/createTooltip';
+import type { Tooltip } from '../components/createTooltip';
+import type { TooltipParams } from '../config/types';
+import { formatTooltipAxis, formatTooltipItem } from '../components/formatTooltip';
 
 export interface GPUContextLike {
   readonly device: GPUDevice | null;
@@ -28,12 +40,22 @@ export interface RenderCoordinator {
   dispose(): void;
 }
 
+export type RenderCoordinatorCallbacks = Readonly<{
+  /**
+   * Optional hook for render-on-demand systems (like `ChartGPU`) to re-render when
+   * interaction state changes (e.g. crosshair on pointer move).
+   */
+  readonly onRequestRender?: () => void;
+}>;
+
 type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number }>;
 
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_TICK_COUNT: number = 5;
 const DEFAULT_TICK_LENGTH_CSS_PX: number = 6;
 const LABEL_PADDING_CSS_PX = 4;
+const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
+const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
 
 const assertUnreachable = (value: never): never => {
   // Intentionally minimal message: this is used for compile-time exhaustiveness.
@@ -112,6 +134,21 @@ const computeGridArea = (gpuContext: GPUContextLike, options: ResolvedChartGPUOp
   };
 };
 
+const rgba01ToCssRgba = (rgba: readonly [number, number, number, number]): string => {
+  const r = Math.max(0, Math.min(255, Math.round(rgba[0] * 255)));
+  const g = Math.max(0, Math.min(255, Math.round(rgba[1] * 255)));
+  const b = Math.max(0, Math.min(255, Math.round(rgba[2] * 255)));
+  const a = Math.max(0, Math.min(1, rgba[3]));
+  return `rgba(${r},${g},${b},${a})`;
+};
+
+const withAlpha = (cssColor: string, alphaMultiplier: number): string => {
+  const parsed = parseCssColorToRgba01(cssColor);
+  if (!parsed) return cssColor;
+  const a = Math.max(0, Math.min(1, parsed[3] * alphaMultiplier));
+  return rgba01ToCssRgba([parsed[0], parsed[1], parsed[2], a]);
+};
+
 const computePlotClipRect = (
   gridArea: GridArea
 ): { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number } => {
@@ -134,6 +171,29 @@ const computePlotClipRect = (
     top: plotTopClip,
     bottom: plotBottomClip,
   };
+};
+
+const clampInt = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v | 0));
+
+const computePlotScissorDevicePx = (
+  gridArea: GridArea
+): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
+  const dpr = window.devicePixelRatio || 1;
+  const { canvasWidth, canvasHeight } = gridArea;
+
+  const plotLeftDevice = gridArea.left * dpr;
+  const plotRightDevice = canvasWidth - gridArea.right * dpr;
+  const plotTopDevice = gridArea.top * dpr;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+
+  const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
+  const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
+  const scissorR = clampInt(Math.ceil(plotRightDevice), 0, Math.max(0, canvasWidth));
+  const scissorB = clampInt(Math.ceil(plotBottomDevice), 0, Math.max(0, canvasHeight));
+  const scissorW = Math.max(0, scissorR - scissorX);
+  const scissorH = Math.max(0, scissorB - scissorY);
+
+  return { x: scissorX, y: scissorY, w: scissorW, h: scissorH };
 };
 
 const clipXToCanvasCssPx = (xClip: number, canvasCssWidth: number): number => ((xClip + 1) / 2) * canvasCssWidth;
@@ -195,7 +255,11 @@ const computeScales = (
   return { xScale, yScale };
 };
 
-export function createRenderCoordinator(gpuContext: GPUContextLike, options: ResolvedChartGPUOptions): RenderCoordinator {
+export function createRenderCoordinator(
+  gpuContext: GPUContextLike,
+  options: ResolvedChartGPUOptions,
+  callbacks?: RenderCoordinatorCallbacks
+): RenderCoordinator {
   if (!gpuContext.initialized) {
     throw new Error('RenderCoordinator: gpuContext must be initialized.');
   }
@@ -219,6 +283,10 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
   let currentOptions: ResolvedChartGPUOptions = options;
   let lastSeriesCount = options.series.length;
 
+  // Tooltip is a DOM overlay element; enable by default unless explicitly disabled.
+  let tooltip: Tooltip | null =
+    overlayContainer && currentOptions.tooltip?.show !== false ? createTooltip(overlayContainer) : null;
+
   legend?.update(currentOptions.series, currentOptions.theme);
 
   let dataStore = createDataStore(device);
@@ -226,6 +294,103 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
   const gridRenderer = createGridRenderer(device, { targetFormat });
   const xAxisRenderer = createAxisRenderer(device, { targetFormat });
   const yAxisRenderer = createAxisRenderer(device, { targetFormat });
+  const crosshairRenderer = createCrosshairRenderer(device, { targetFormat });
+  crosshairRenderer.setVisible(false);
+  const highlightRenderer = createHighlightRenderer(device, { targetFormat });
+  highlightRenderer.setVisible(false);
+
+  const initialGridArea = computeGridArea(gpuContext, currentOptions);
+  const eventManager = createEventManager(gpuContext.canvas, initialGridArea);
+
+  type PointerState = Readonly<{
+    x: number;
+    y: number;
+    gridX: number;
+    gridY: number;
+    isInGrid: boolean;
+    hasPointer: boolean;
+  }>;
+
+  let pointerState: PointerState = { x: 0, y: 0, gridX: 0, gridY: 0, isInGrid: false, hasPointer: false };
+
+  const requestRender = (): void => {
+    callbacks?.onRequestRender?.();
+  };
+
+  const getPlotSizeCssPx = (
+    canvas: HTMLCanvasElement,
+    gridArea: GridArea
+  ): { readonly plotWidthCss: number; readonly plotHeightCss: number } | null => {
+    const rect = canvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+
+    const plotWidthCss = rect.width - gridArea.left - gridArea.right;
+    const plotHeightCss = rect.height - gridArea.top - gridArea.bottom;
+    if (!(plotWidthCss > 0) || !(plotHeightCss > 0)) return null;
+
+    return { plotWidthCss, plotHeightCss };
+  };
+
+  const computeInteractionScalesGridCssPx = (
+    gridArea: GridArea
+  ): { readonly xScale: LinearScale; readonly yScale: LinearScale } | null => {
+    const canvas = gpuContext.canvas;
+    if (!canvas) return null;
+
+    const plotSize = getPlotSizeCssPx(canvas, gridArea);
+    if (!plotSize) return null;
+
+    const bounds = computeGlobalBounds(currentOptions.series);
+
+    const xMin = currentOptions.xAxis.min ?? bounds.xMin;
+    const xMax = currentOptions.xAxis.max ?? bounds.xMax;
+    const yMin = currentOptions.yAxis.min ?? bounds.yMin;
+    const yMax = currentOptions.yAxis.max ?? bounds.yMax;
+
+    const xDomain = normalizeDomain(xMin, xMax);
+    const yDomain = normalizeDomain(yMin, yMax);
+
+    // IMPORTANT: grid-local CSS px ranges (0..plotWidth/Height), for interaction hit-testing.
+    const xScale = createLinearScale().domain(xDomain.min, xDomain.max).range(0, plotSize.plotWidthCss);
+    const yScale = createLinearScale().domain(yDomain.min, yDomain.max).range(plotSize.plotHeightCss, 0);
+
+    return { xScale, yScale };
+  };
+
+  const buildTooltipParams = (seriesIndex: number, dataIndex: number, point: DataPoint): TooltipParams => {
+    const s = currentOptions.series[seriesIndex];
+    const { x, y } = getPointXY(point);
+    return {
+      seriesName: s?.name ?? '',
+      seriesIndex,
+      dataIndex,
+      value: [x, y],
+      color: s?.color ?? '#888',
+    };
+  };
+
+  const onMouseMove = (payload: ChartGPUEventPayload): void => {
+    pointerState = {
+      x: payload.x,
+      y: payload.y,
+      gridX: payload.gridX,
+      gridY: payload.gridY,
+      isInGrid: payload.isInGrid,
+      hasPointer: true,
+    };
+    crosshairRenderer.setVisible(payload.isInGrid);
+    requestRender();
+  };
+
+  const onMouseLeave = (_payload: ChartGPUEventPayload): void => {
+    pointerState = { ...pointerState, isInGrid: false, hasPointer: false };
+    crosshairRenderer.setVisible(false);
+    tooltip?.hide();
+    requestRender();
+  };
+
+  eventManager.on('mousemove', onMouseMove);
+  eventManager.on('mouseleave', onMouseLeave);
 
   const areaRenderers: Array<ReturnType<typeof createAreaRenderer>> = [];
   const lineRenderers: Array<ReturnType<typeof createLineRenderer>> = [];
@@ -262,6 +427,15 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
     currentOptions = resolvedOptions;
     legend?.update(resolvedOptions.series, resolvedOptions.theme);
 
+    // Tooltip enablement may change at runtime.
+    if (overlayContainer) {
+      const shouldHaveTooltip = currentOptions.tooltip?.show !== false;
+      if (shouldHaveTooltip && !tooltip) tooltip = createTooltip(overlayContainer);
+      if (!shouldHaveTooltip && tooltip) tooltip.hide();
+    } else {
+      tooltip?.hide();
+    }
+
     const nextCount = resolvedOptions.series.length;
     ensureAreaRendererCount(nextCount);
     ensureLineRendererCount(nextCount);
@@ -292,6 +466,7 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
     if (!gpuContext.canvasContext || !gpuContext.canvas) return;
 
     const gridArea = computeGridArea(gpuContext, currentOptions);
+    eventManager.updateGridArea(gridArea);
     const { xScale, yScale } = computeScales(currentOptions, gridArea);
     const plotClipRect = computePlotClipRect(gridArea);
 
@@ -312,6 +487,115 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
       currentOptions.theme.axisLineColor,
       currentOptions.theme.axisTickColor
     );
+
+    // Crosshair prepare uses canvas-local CSS px (EventManager payload x/y) and current gridArea.
+    if (pointerState.hasPointer && pointerState.isInGrid) {
+      const crosshairOptions: CrosshairRenderOptions = {
+        showX: true,
+        showY: true,
+        color: withAlpha(currentOptions.theme.axisLineColor, 0.6),
+        lineWidth: DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX,
+      };
+      crosshairRenderer.prepare(pointerState.x, pointerState.y, gridArea, crosshairOptions);
+      crosshairRenderer.setVisible(true);
+    } else {
+      crosshairRenderer.setVisible(false);
+    }
+
+    // Highlight: on hover, find nearest point and draw a ring highlight clipped to plot rect.
+    if (pointerState.hasPointer && pointerState.isInGrid) {
+      const interactionScales = computeInteractionScalesGridCssPx(gridArea);
+      if (interactionScales) {
+        const match = findNearestPoint(
+          currentOptions.series,
+          pointerState.gridX,
+          pointerState.gridY,
+          interactionScales.xScale,
+          interactionScales.yScale
+        );
+
+        if (match) {
+          const { x, y } = getPointXY(match.point);
+          const xGridCss = interactionScales.xScale.scale(x);
+          const yGridCss = interactionScales.yScale.scale(y);
+
+          if (Number.isFinite(xGridCss) && Number.isFinite(yGridCss)) {
+            const dpr = window.devicePixelRatio || 1;
+            const centerCssX = gridArea.left + xGridCss;
+            const centerCssY = gridArea.top + yGridCss;
+
+            const plotScissor = computePlotScissorDevicePx(gridArea);
+            const point: HighlightPoint = {
+              centerDeviceX: centerCssX * dpr,
+              centerDeviceY: centerCssY * dpr,
+              canvasWidth: gridArea.canvasWidth,
+              canvasHeight: gridArea.canvasHeight,
+              scissor: plotScissor,
+            };
+
+            const seriesColor = currentOptions.series[match.seriesIndex]?.color ?? '#888';
+            highlightRenderer.prepare(point, seriesColor, DEFAULT_HIGHLIGHT_SIZE_CSS_PX);
+            highlightRenderer.setVisible(true);
+          } else {
+            highlightRenderer.setVisible(false);
+          }
+        } else {
+          highlightRenderer.setVisible(false);
+        }
+      } else {
+        highlightRenderer.setVisible(false);
+      }
+    } else {
+      highlightRenderer.setVisible(false);
+    }
+
+    // Tooltip: on hover, find matches and render tooltip near cursor.
+    if (tooltip && pointerState.hasPointer && pointerState.isInGrid) {
+      const scales = computeInteractionScalesGridCssPx(gridArea);
+      const canvas = gpuContext.canvas;
+
+      if (scales && canvas && currentOptions.tooltip?.show !== false) {
+        const formatter = currentOptions.tooltip?.formatter;
+        const trigger = currentOptions.tooltip?.trigger ?? 'item';
+
+        const containerX = canvas.offsetLeft + pointerState.x;
+        const containerY = canvas.offsetTop + pointerState.y;
+
+        if (trigger === 'axis') {
+          const matches = findPointsAtX(currentOptions.series, pointerState.gridX, scales.xScale);
+          if (matches.length === 0) {
+            tooltip.hide();
+          } else {
+            const paramsArray = matches.map((m) => buildTooltipParams(m.seriesIndex, m.dataIndex, m.point));
+            const content = formatter
+              ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
+              : formatTooltipAxis(paramsArray);
+            if (content) tooltip.show(containerX, containerY, content);
+            else tooltip.hide();
+          }
+        } else {
+          const match = findNearestPoint(
+            currentOptions.series,
+            pointerState.gridX,
+            pointerState.gridY,
+            scales.xScale,
+            scales.yScale
+          );
+          if (!match) {
+            tooltip.hide();
+          } else {
+            const params = buildTooltipParams(match.seriesIndex, match.dataIndex, match.point);
+            const content = formatter ? (formatter as (p: TooltipParams) => string)(params) : formatTooltipItem(params);
+            if (content) tooltip.show(containerX, containerY, content);
+            else tooltip.hide();
+          }
+        }
+      } else {
+        tooltip.hide();
+      }
+    } else {
+      tooltip?.hide();
+    }
 
     const globalBounds = computeGlobalBounds(currentOptions.series);
     const defaultBaseline = currentOptions.yAxis.min ?? globalBounds.yMin;
@@ -370,6 +654,7 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
     // - grid first (background)
     // - area fills next (so they don't cover strokes/axes)
     // - line strokes next
+    // - highlight next (on top of strokes)
     // - axes last (on top)
     gridRenderer.render(pass);
 
@@ -384,8 +669,10 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
       }
     }
 
+    highlightRenderer.render(pass);
     xAxisRenderer.render(pass);
     yAxisRenderer.render(pass);
+    crosshairRenderer.render(pass);
 
     pass.end();
     device.queue.submit([encoder.finish()]);
@@ -513,6 +800,10 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
     if (disposed) return;
     disposed = true;
 
+    eventManager.dispose();
+    crosshairRenderer.dispose();
+    highlightRenderer.dispose();
+
     for (let i = 0; i < areaRenderers.length; i++) {
       areaRenderers[i].dispose();
     }
@@ -529,7 +820,9 @@ export function createRenderCoordinator(gpuContext: GPUContextLike, options: Res
 
     dataStore.dispose();
 
-    // Dispose the legend before the text overlay (both touch container positioning).
+    // Dispose tooltip/legend before the text overlay (all touch container positioning).
+    tooltip?.dispose();
+    tooltip = null;
     legend?.dispose();
     overlay?.dispose();
   };
