@@ -7,6 +7,10 @@ export type ChartGPUEventPayload = {
   readonly y: number;
   readonly gridX: number;
   readonly gridY: number;
+  /** Plot (grid) width in CSS pixels. */
+  readonly plotWidthCss: number;
+  /** Plot (grid) height in CSS pixels. */
+  readonly plotHeightCss: number;
   readonly isInGrid: boolean;
   readonly originalEvent: PointerEvent;
 };
@@ -14,6 +18,7 @@ export type ChartGPUEventPayload = {
 export type ChartGPUEventCallback = (payload: ChartGPUEventPayload) => void;
 
 export interface EventManager {
+  readonly canvas: HTMLCanvasElement;
   on(event: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   off(event: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   updateGridArea(gridArea: GridArea): void;
@@ -66,7 +71,7 @@ export function createEventManager(canvas: HTMLCanvasElement, initialGridArea: G
       gridY >= 0 &&
       gridY <= plotHeightCss;
 
-    return { x, y, gridX, gridY, isInGrid, originalEvent: e };
+    return { x, y, gridX, gridY, plotWidthCss, plotHeightCss, isInGrid, originalEvent: e };
   };
 
   const emit = (eventName: ChartGPUEventName, e: PointerEvent): void => {
@@ -204,5 +209,5 @@ export function createEventManager(canvas: HTMLCanvasElement, initialGridArea: G
     listeners.mouseleave.clear();
   };
 
-  return { on, off, updateGridArea, dispose };
+  return { canvas, on, off, updateGridArea, dispose };
 }

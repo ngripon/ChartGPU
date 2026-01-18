@@ -146,7 +146,13 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 **Data zoom (type definitions):**
 
 - **`ChartGPUOptions.dataZoom?: ReadonlyArray<DataZoomConfig>`**: optional data-zoom configuration list. See [`ChartGPUOptions`](../src/config/types.ts) and [`DataZoomConfig`](../src/config/types.ts).
-- **Type-only note (important)**: `dataZoom` and `DataZoomConfig` are configuration types; runtime zoom interaction/UI behavior is not necessarily implemented.
+- **Runtime behavior (current)**: when `ChartGPUOptions.dataZoom` includes `{ type: 'inside' }`, ChartGPU enables an internal “inside zoom” interaction that updates the effective x-domain used for rendering and pointer interaction. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and the handler implementation in [`createInsideZoom.ts`](../src/interaction/createInsideZoom.ts).
+  - **Zoom gesture**: mouse wheel zoom, centered on the current cursor x-position (only when the pointer is inside the plot grid).
+  - **Pan gesture**: shift+left-drag or middle-mouse drag pans left/right (only when the pointer is inside the plot grid).
+  - **Scope**: x-axis only (the zoom window is applied to the x-domain; y-domain is unchanged).
+  - **Grid-only**: input is ignored outside the plot grid (respects `grid` margins).
+  - **UI**: no slider UI is currently implemented (`type: 'slider'` is type-only).
+  - **Config fields (current)**: `start` / `end` are used as the initial percent window (defaulting to `0` / `100` when omitted). Other fields (`xAxisIndex`, `minSpan`, `maxSpan`) are currently accepted by the type and preserved by option resolution, but are not yet applied by the runtime zoom path.
 - **`DataZoomConfig`**: data zoom configuration type. See [`DataZoomConfig`](../src/config/types.ts).
   - **`type: 'inside' | 'slider'`**
   - **`xAxisIndex?: number`**
@@ -385,9 +391,11 @@ See [`createEventManager.ts`](../src/interaction/createEventManager.ts).
 
 - **Factory**: `createEventManager(canvas: HTMLCanvasElement, initialGridArea: GridArea): EventManager`
 - **Purpose**: normalizes pointer input into chart-friendly coordinates and emits `'mousemove' | 'click' | 'mouseleave'` events.
+- **Canvas access**: `EventManager.canvas` exposes the canvas element the manager was created for (used by internal interaction handlers; see [`createInsideZoom.ts`](../src/interaction/createInsideZoom.ts)).
 - **Coordinate contract (critical)**:
   - `payload.x` / `payload.y` are **canvas-local CSS pixels** (relative to the canvas top-left in CSS px via `getBoundingClientRect()`).
   - `payload.gridX` / `payload.gridY` are **plot-area-local CSS pixels** (canvas-local CSS px minus `GridArea` CSS-pixel margins).
+  - `payload.plotWidthCss` / `payload.plotHeightCss` are the plot (grid) dimensions in **CSS pixels** (derived from `getBoundingClientRect()` minus `gridArea` margins).
   - `payload.isInGrid` is computed in **CSS pixels** against the current plot rect.
 - **Layout updates**: `EventManager.updateGridArea(gridArea)` must be called when grid/layout changes (ChartGPU’s internal render coordinator updates it each render).
 - **Current usage**: used internally by the render coordinator to drive the crosshair overlay and to request renders in render-on-demand systems. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
@@ -413,6 +421,14 @@ See [`createZoomState.ts`](../src/interaction/createZoomState.ts).
 - **Span constraints**: `minSpan` / `maxSpan` are enforced (currently internal defaults); when a span clamp is required during zooming, the zoom anchor is preserved as much as possible.
 - **Pan**: `pan(delta)` shifts the window by percent points while preserving span (clamped to bounds).
 - **Listener management**: `onChange(callback)` returns an unsubscribe function; emissions iterate a snapshot of listeners so subscription changes during emit don’t affect the current emission.
+
+#### Inside zoom handler (internal / Story 5.3)
+
+See [`createInsideZoom.ts`](../src/interaction/createInsideZoom.ts) and the enablement/wiring in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+
+- **Purpose**: implements “inside” x-zoom and x-pan behavior (wheel zoom centered on cursor-x; drag pan) for cartesian charts.
+- **Enablement**: enabled when resolved options include `dataZoom` with an entry where `type === 'inside'` (option normalization/preservation happens in [`OptionResolver.ts`](../src/config/OptionResolver.ts)).
+- **Scope**: plot grid only and x-axis only (it updates the percent zoom window and the coordinator applies that window to the x-domain for both rendering scales and interaction scales).
 
 #### Nearest point detection (internal)
 

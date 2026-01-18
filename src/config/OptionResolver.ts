@@ -2,6 +2,7 @@ import type {
   AreaStyleConfig,
   AxisConfig,
   ChartGPUOptions,
+  DataZoomConfig,
   GridConfig,
   LineStyleConfig,
   AreaSeriesConfig,
@@ -71,6 +72,39 @@ export interface ResolvedChartGPUOptions
   readonly palette: ReadonlyArray<string>;
   readonly series: ReadonlyArray<ResolvedSeriesConfig>;
 }
+
+const sanitizeDataZoom = (input: unknown): ReadonlyArray<DataZoomConfig> | undefined => {
+  if (!Array.isArray(input)) return undefined;
+
+  const out: DataZoomConfig[] = [];
+
+  for (const item of input) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+
+    const type = record.type;
+    if (type !== 'inside' && type !== 'slider') continue;
+
+    const xAxisIndexRaw = record.xAxisIndex;
+    const startRaw = record.start;
+    const endRaw = record.end;
+    const minSpanRaw = record.minSpan;
+    const maxSpanRaw = record.maxSpan;
+
+    const xAxisIndex =
+      typeof xAxisIndexRaw === 'number' && Number.isFinite(xAxisIndexRaw) ? xAxisIndexRaw : undefined;
+    const start = typeof startRaw === 'number' && Number.isFinite(startRaw) ? startRaw : undefined;
+    const end = typeof endRaw === 'number' && Number.isFinite(endRaw) ? endRaw : undefined;
+    const minSpan =
+      typeof minSpanRaw === 'number' && Number.isFinite(minSpanRaw) ? minSpanRaw : undefined;
+    const maxSpan =
+      typeof maxSpanRaw === 'number' && Number.isFinite(maxSpanRaw) ? maxSpanRaw : undefined;
+
+    out.push({ type, xAxisIndex, start, end, minSpan, maxSpan });
+  }
+
+  return out;
+};
 
 const sanitizePalette = (palette: unknown): string[] => {
   if (!Array.isArray(palette)) return [];
@@ -248,6 +282,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
     grid,
     xAxis,
     yAxis,
+    dataZoom: sanitizeDataZoom((userOptions as ChartGPUOptions).dataZoom),
     theme,
     palette: theme.colorPalette,
     series,

@@ -20,6 +20,9 @@ import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
 import type { HighlightPoint } from '../renderers/createHighlightRenderer';
 import { createEventManager } from '../interaction/createEventManager';
 import type { ChartGPUEventPayload } from '../interaction/createEventManager';
+import { createInsideZoom } from '../interaction/createInsideZoom';
+import { createZoomState } from '../interaction/createZoomState';
+import type { ZoomRange, ZoomState } from '../interaction/createZoomState';
 import { findNearestPoint } from '../interaction/findNearestPoint';
 import { findPointsAtX } from '../interaction/findPointsAtX';
 import { findPieSlice } from '../interaction/findPieSlice';
@@ -327,17 +330,28 @@ const formatTickValue = (nf: Intl.NumberFormat, v: number): string | null => {
 
 const computeScales = (
   options: ResolvedChartGPUOptions,
-  gridArea: GridArea
+  gridArea: GridArea,
+  zoomRange?: ZoomRange | null
 ): { readonly xScale: LinearScale; readonly yScale: LinearScale } => {
   const clipRect = computePlotClipRect(gridArea);
   const bounds = computeGlobalBounds(options.series);
 
-  const xMin = options.xAxis.min ?? bounds.xMin;
-  const xMax = options.xAxis.max ?? bounds.xMax;
+  const baseMin = options.xAxis.min ?? bounds.xMin;
+  const baseMax = options.xAxis.max ?? bounds.xMax;
   const yMin = options.yAxis.min ?? bounds.yMin;
   const yMax = options.yAxis.max ?? bounds.yMax;
 
-  const xDomain = normalizeDomain(xMin, xMax);
+  const baseXDomain = normalizeDomain(baseMin, baseMax);
+  const xDomain = (() => {
+    if (!zoomRange) return baseXDomain;
+    const span = baseXDomain.max - baseXDomain.min;
+    if (!Number.isFinite(span) || span === 0) return baseXDomain;
+    const start = zoomRange.start;
+    const end = zoomRange.end;
+    const xMin = baseXDomain.min + (start / 100) * span;
+    const xMax = baseXDomain.min + (end / 100) * span;
+    return normalizeDomain(xMin, xMax);
+  })();
   const yDomain = normalizeDomain(yMin, yMax);
 
   const xScale = createLinearScale().domain(xDomain.min, xDomain.max).range(clipRect.left, clipRect.right);
@@ -462,7 +476,8 @@ export function createRenderCoordinator(
   };
 
   const computeInteractionScalesGridCssPx = (
-    gridArea: GridArea
+    gridArea: GridArea,
+    zoomRange?: ZoomRange | null
   ):
     | {
         readonly xScale: LinearScale;
@@ -479,12 +494,22 @@ export function createRenderCoordinator(
 
     const bounds = computeGlobalBounds(currentOptions.series);
 
-    const xMin = currentOptions.xAxis.min ?? bounds.xMin;
-    const xMax = currentOptions.xAxis.max ?? bounds.xMax;
+    const baseMin = currentOptions.xAxis.min ?? bounds.xMin;
+    const baseMax = currentOptions.xAxis.max ?? bounds.xMax;
     const yMin = currentOptions.yAxis.min ?? bounds.yMin;
     const yMax = currentOptions.yAxis.max ?? bounds.yMax;
 
-    const xDomain = normalizeDomain(xMin, xMax);
+    const baseXDomain = normalizeDomain(baseMin, baseMax);
+    const xDomain = (() => {
+      if (!zoomRange) return baseXDomain;
+      const span = baseXDomain.max - baseXDomain.min;
+      if (!Number.isFinite(span) || span === 0) return baseXDomain;
+      const start = zoomRange.start;
+      const end = zoomRange.end;
+      const xMin = baseXDomain.min + (start / 100) * span;
+      const xMax = baseXDomain.min + (end / 100) * span;
+      return normalizeDomain(xMin, xMax);
+    })();
     const yDomain = normalizeDomain(yMin, yMax);
 
     // IMPORTANT: grid-local CSS px ranges (0..plotWidth/Height), for interaction hit-testing.
@@ -546,6 +571,46 @@ export function createRenderCoordinator(
   eventManager.on('mousemove', onMouseMove);
   eventManager.on('mouseleave', onMouseLeave);
 
+  // Optional internal “inside zoom” (wheel zoom + drag pan).
+  let zoomState: ZoomState | null = null;
+  let insideZoom: ReturnType<typeof createInsideZoom> | null = null;
+  let unsubscribeZoom: (() => void) | null = null;
+
+  const getInsideZoomConfig = (
+    opts: ResolvedChartGPUOptions
+  ): { readonly start: number; readonly end: number } | null => {
+    const cfg = opts.dataZoom?.find((z) => z?.type === 'inside');
+    if (!cfg) return null;
+    const start = Number.isFinite(cfg.start) ? cfg.start! : 0;
+    const end = Number.isFinite(cfg.end) ? cfg.end! : 100;
+    return { start, end };
+  };
+
+  const updateInsideZoom = (): void => {
+    const cfg = getInsideZoomConfig(currentOptions);
+
+    if (!cfg) {
+      insideZoom?.dispose();
+      insideZoom = null;
+      unsubscribeZoom?.();
+      unsubscribeZoom = null;
+      zoomState = null;
+      return;
+    }
+
+    if (zoomState) return;
+
+    zoomState = createZoomState(cfg.start, cfg.end);
+    unsubscribeZoom = zoomState.onChange(() => {
+      requestRender();
+    });
+
+    insideZoom = createInsideZoom(eventManager, zoomState);
+    insideZoom.enable();
+  };
+
+  updateInsideZoom();
+
   const areaRenderers: Array<ReturnType<typeof createAreaRenderer>> = [];
   const lineRenderers: Array<ReturnType<typeof createLineRenderer>> = [];
   const scatterRenderers: Array<ReturnType<typeof createScatterRenderer>> = [];
@@ -605,6 +670,7 @@ export function createRenderCoordinator(
     assertNotDisposed();
     currentOptions = resolvedOptions;
     legend?.update(resolvedOptions.series, resolvedOptions.theme);
+    updateInsideZoom();
 
     // Tooltip enablement may change at runtime.
     if (overlayContainer) {
@@ -656,10 +722,11 @@ export function createRenderCoordinator(
 
     const gridArea = computeGridArea(gpuContext, currentOptions);
     eventManager.updateGridArea(gridArea);
-    const { xScale, yScale } = computeScales(currentOptions, gridArea);
+    const zoomRange = zoomState?.getRange() ?? null;
+    const { xScale, yScale } = computeScales(currentOptions, gridArea, zoomRange);
     const plotClipRect = computePlotClipRect(gridArea);
 
-    const interactionScales = computeInteractionScalesGridCssPx(gridArea);
+    const interactionScales = computeInteractionScalesGridCssPx(gridArea, zoomRange);
     lastInteractionScales = interactionScales;
 
     // Keep `interactionX` in sync with real pointer movement (domain units).
@@ -1175,6 +1242,12 @@ export function createRenderCoordinator(
   const dispose: RenderCoordinator['dispose'] = () => {
     if (disposed) return;
     disposed = true;
+
+    insideZoom?.dispose();
+    insideZoom = null;
+    unsubscribeZoom?.();
+    unsubscribeZoom = null;
+    zoomState = null;
 
     eventManager.dispose();
     crosshairRenderer.dispose();
