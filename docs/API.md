@@ -387,6 +387,12 @@ All WebGPU types are provided by `@webgpu/types`. See [GPUContext.ts](../src/cor
 
 Chart data uploads and per-series GPU vertex buffer caching are handled by the internal `createDataStore(device)` helper. See [`createDataStore.ts`](../src/data/createDataStore.ts). This module is intentionally not exported from the public entrypoint (`src/index.ts`). **Buffers grow geometrically** to reduce reallocations when data grows incrementally.
 
+### GPU buffer streaming (internal / contributor notes)
+
+For frequently-updated dynamic geometry (e.g. interaction overlays), ChartGPU includes an internal streaming buffer helper that uses **double-buffering** (alternates two `GPUBuffer`s) to avoid writing into a buffer the GPU may still be reading, and uses `device.queue.writeBuffer(...)` with **partial range updates when possible**.
+
+See [`createStreamBuffer.ts`](../src/data/createStreamBuffer.ts) for the helper API (`createStreamBuffer(device, maxSizeBytes)` returning `{ write, getBuffer, getVertexCount, dispose }`) and current usage in [`createCrosshairRenderer.ts`](../src/renderers/createCrosshairRenderer.ts).
+
 ### CPU downsampling (internal / contributor notes)
 
 ChartGPU includes a small CPU-side Largest Triangle Three Buckets (LTTB) downsampler intended for internal tooling/acceptance checks and offline preprocessing. See [`lttbSample.ts`](../src/data/lttbSample.ts). This helper is currently **internal-only** (not exported from the public entrypoint `src/index.ts`).
