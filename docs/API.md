@@ -400,8 +400,8 @@ See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) for t
 
 - **Layout**: computes `GridArea` from resolved grid margins and canvas size.
 - **Scales**: derives `xScale`/`yScale` in clip space; respects explicit axis `min`/`max` overrides and otherwise falls back to global series bounds.
-- **Orchestration order**: clear → grid → area fills → line strokes → axes → crosshair.
-- **Interaction + crosshair (internal)**: the render coordinator creates an internal [event manager](#event-manager-internal) and an internal [crosshair renderer](#crosshair-renderer-internal--contributor-notes). Pointer `mousemove`/`mouseleave` updates crosshair visibility/position; when provided, `callbacks.onRequestRender?.()` is used so pointer movement schedules renders in render-on-demand systems (e.g. `ChartGPU`).
+- **Orchestration order**: clear → grid → area fills → line strokes → hover highlight → axes → crosshair.
+- **Interaction overlays (internal)**: the render coordinator creates an internal [event manager](#event-manager-internal), an internal [crosshair renderer](#crosshair-renderer-internal--contributor-notes), and an internal [highlight renderer](#highlight-renderer-internal--contributor-notes). Pointer `mousemove`/`mouseleave` updates interaction state and toggles overlay visibility; when provided, `callbacks.onRequestRender?.()` is used so pointer movement schedules renders in render-on-demand systems (e.g. `ChartGPU`).
 - **Pointer coordinate contract (high-level)**: the crosshair `prepare(...)` path expects **canvas-local CSS pixels** (`EventManager` payload `x`/`y`). See [`createEventManager.ts`](../src/interaction/createEventManager.ts) and [`createCrosshairRenderer.ts`](../src/renderers/createCrosshairRenderer.ts).
 - **Target format**: uses `gpuContext.preferredFormat` (fallback `'bgra8unorm'`) for renderer pipelines; must match the render pass color attachment format.
 - **Theme application (essential)**: see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
@@ -491,6 +491,21 @@ A crosshair overlay renderer factory lives in [`createCrosshairRenderer.ts`](../
 - **`CrosshairRenderOptions`**: `{ showX: boolean, showY: boolean, color: string, lineWidth: number }`
 
 Shader source: [`crosshair.wgsl`](../src/shaders/crosshair.wgsl) (`line-list` pipeline; fragment outputs a uniform RGBA color with alpha blending enabled).
+
+#### Highlight renderer (internal / contributor notes)
+
+A point highlight overlay renderer factory lives in [`createHighlightRenderer.ts`](../src/renderers/createHighlightRenderer.ts). It is currently internal (not exported from the public entrypoint `src/index.ts`).
+
+- **Factory**: `createHighlightRenderer(device: GPUDevice, options?: HighlightRendererOptions): HighlightRenderer`
+- **`HighlightRenderer.prepare(point: HighlightPoint, color: string, size: number): void`**: prepares a ring highlight for a single point.
+  - **Coordinate contract (high-level)**: `HighlightPoint.centerDeviceX/centerDeviceY` are **device pixels** (same coordinate space as fragment `@builtin(position)`), `HighlightPoint.scissor` is a **device-pixel scissor rect** for the plot area, and `size` is specified in **CSS pixels** (scaled by DPR internally).
+- **`HighlightRenderer.render(passEncoder: GPURenderPassEncoder): void`**
+- **`HighlightRenderer.setVisible(visible: boolean): void`**
+- **`HighlightRenderer.dispose(): void`**
+
+Shader source: [`highlight.wgsl`](../src/shaders/highlight.wgsl) (fullscreen triangle; fragment draws a soft-edged ring around the prepared center position with alpha blending enabled).
+
+Hover highlight behavior is orchestrated by the render coordinator in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts): when the pointer is inside the plot grid, it finds the nearest data point (via [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts)) and prepares the highlight ring at that point, clipped to the plot rect; otherwise the highlight is hidden.
 
 **WGSL imports:** renderers may import WGSL as a raw string via Vite’s `?raw` query (e.g. `*.wgsl?raw`). TypeScript support for this pattern is provided by [`wgsl-raw.d.ts`](../src/wgsl-raw.d.ts).
 

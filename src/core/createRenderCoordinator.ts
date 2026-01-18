@@ -8,6 +8,8 @@ import { createAreaRenderer } from '../renderers/createAreaRenderer';
 import { createLineRenderer } from '../renderers/createLineRenderer';
 import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
 import type { CrosshairRenderOptions } from '../renderers/createCrosshairRenderer';
+import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
+import type { HighlightPoint } from '../renderers/createHighlightRenderer';
 import { createEventManager } from '../interaction/createEventManager';
 import type { ChartGPUEventPayload } from '../interaction/createEventManager';
 import { findNearestPoint } from '../interaction/findNearestPoint';
@@ -53,6 +55,7 @@ const DEFAULT_TICK_COUNT: number = 5;
 const DEFAULT_TICK_LENGTH_CSS_PX: number = 6;
 const LABEL_PADDING_CSS_PX = 4;
 const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
+const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
 
 const assertUnreachable = (value: never): never => {
   // Intentionally minimal message: this is used for compile-time exhaustiveness.
@@ -170,6 +173,29 @@ const computePlotClipRect = (
   };
 };
 
+const clampInt = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v | 0));
+
+const computePlotScissorDevicePx = (
+  gridArea: GridArea
+): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
+  const dpr = window.devicePixelRatio || 1;
+  const { canvasWidth, canvasHeight } = gridArea;
+
+  const plotLeftDevice = gridArea.left * dpr;
+  const plotRightDevice = canvasWidth - gridArea.right * dpr;
+  const plotTopDevice = gridArea.top * dpr;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+
+  const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
+  const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
+  const scissorR = clampInt(Math.ceil(plotRightDevice), 0, Math.max(0, canvasWidth));
+  const scissorB = clampInt(Math.ceil(plotBottomDevice), 0, Math.max(0, canvasHeight));
+  const scissorW = Math.max(0, scissorR - scissorX);
+  const scissorH = Math.max(0, scissorB - scissorY);
+
+  return { x: scissorX, y: scissorY, w: scissorW, h: scissorH };
+};
+
 const clipXToCanvasCssPx = (xClip: number, canvasCssWidth: number): number => ((xClip + 1) / 2) * canvasCssWidth;
 const clipYToCanvasCssPx = (yClip: number, canvasCssHeight: number): number => ((1 - yClip) / 2) * canvasCssHeight;
 
@@ -270,6 +296,8 @@ export function createRenderCoordinator(
   const yAxisRenderer = createAxisRenderer(device, { targetFormat });
   const crosshairRenderer = createCrosshairRenderer(device, { targetFormat });
   crosshairRenderer.setVisible(false);
+  const highlightRenderer = createHighlightRenderer(device, { targetFormat });
+  highlightRenderer.setVisible(false);
 
   const initialGridArea = computeGridArea(gpuContext, currentOptions);
   const eventManager = createEventManager(gpuContext.canvas, initialGridArea);
@@ -474,6 +502,53 @@ export function createRenderCoordinator(
       crosshairRenderer.setVisible(false);
     }
 
+    // Highlight: on hover, find nearest point and draw a ring highlight clipped to plot rect.
+    if (pointerState.hasPointer && pointerState.isInGrid) {
+      const interactionScales = computeInteractionScalesGridCssPx(gridArea);
+      if (interactionScales) {
+        const match = findNearestPoint(
+          currentOptions.series,
+          pointerState.gridX,
+          pointerState.gridY,
+          interactionScales.xScale,
+          interactionScales.yScale
+        );
+
+        if (match) {
+          const { x, y } = getPointXY(match.point);
+          const xGridCss = interactionScales.xScale.scale(x);
+          const yGridCss = interactionScales.yScale.scale(y);
+
+          if (Number.isFinite(xGridCss) && Number.isFinite(yGridCss)) {
+            const dpr = window.devicePixelRatio || 1;
+            const centerCssX = gridArea.left + xGridCss;
+            const centerCssY = gridArea.top + yGridCss;
+
+            const plotScissor = computePlotScissorDevicePx(gridArea);
+            const point: HighlightPoint = {
+              centerDeviceX: centerCssX * dpr,
+              centerDeviceY: centerCssY * dpr,
+              canvasWidth: gridArea.canvasWidth,
+              canvasHeight: gridArea.canvasHeight,
+              scissor: plotScissor,
+            };
+
+            const seriesColor = currentOptions.series[match.seriesIndex]?.color ?? '#888';
+            highlightRenderer.prepare(point, seriesColor, DEFAULT_HIGHLIGHT_SIZE_CSS_PX);
+            highlightRenderer.setVisible(true);
+          } else {
+            highlightRenderer.setVisible(false);
+          }
+        } else {
+          highlightRenderer.setVisible(false);
+        }
+      } else {
+        highlightRenderer.setVisible(false);
+      }
+    } else {
+      highlightRenderer.setVisible(false);
+    }
+
     // Tooltip: on hover, find matches and render tooltip near cursor.
     if (tooltip && pointerState.hasPointer && pointerState.isInGrid) {
       const scales = computeInteractionScalesGridCssPx(gridArea);
@@ -579,6 +654,7 @@ export function createRenderCoordinator(
     // - grid first (background)
     // - area fills next (so they don't cover strokes/axes)
     // - line strokes next
+    // - highlight next (on top of strokes)
     // - axes last (on top)
     gridRenderer.render(pass);
 
@@ -593,6 +669,7 @@ export function createRenderCoordinator(
       }
     }
 
+    highlightRenderer.render(pass);
     xAxisRenderer.render(pass);
     yAxisRenderer.render(pass);
     crosshairRenderer.render(pass);
@@ -725,6 +802,7 @@ export function createRenderCoordinator(
 
     eventManager.dispose();
     crosshairRenderer.dispose();
+    highlightRenderer.dispose();
 
     for (let i = 0; i < areaRenderers.length; i++) {
       areaRenderers[i].dispose();
