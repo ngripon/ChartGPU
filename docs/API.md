@@ -183,6 +183,13 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 - **`TooltipConfig.trigger?: 'item' | 'axis'`**: tooltip trigger mode.
 - **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`).
 
+**Animation (type definitions):**
+
+- **`ChartGPUOptions.animation?: AnimationConfig | boolean`**: optional animation configuration.
+  - **Disablement**: set to `false` to disable all animation.
+  - **Defaults**: when enabled, `AnimationConfig.duration` defaults to `300`ms when omitted.
+- **`AnimationConfig`**: supports optional `duration?: number` (ms), `easing?: 'linear' | 'cubicOut' | 'cubicInOut' | 'bounceOut'`, and `delay?: number` (ms). See [`types.ts`](../src/config/types.ts).
+
 **`TooltipParams` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`types.ts`](../src/config/types.ts).
 
 Default tooltip formatter helpers are available in [`formatTooltip.ts`](../src/components/formatTooltip.ts): `formatTooltipItem(params: TooltipParams): string` (item mode) and `formatTooltipAxis(params: TooltipParams[]): string` (axis mode). Both return HTML strings intended for the internal tooltip overlay’s `innerHTML` usage; the axis formatter includes an x header line.
