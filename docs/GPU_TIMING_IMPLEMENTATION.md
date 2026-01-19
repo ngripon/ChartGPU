@@ -2,7 +2,11 @@
 
 ## Overview
 
-GPU timing has been implemented in the `examples/million-points` benchmark using `GPUDevice.queue.onSubmittedWorkDone()` to measure GPU execution time without stalling the pipeline.
+GPU timing is available in the `examples/million-points` benchmark to help distinguish CPU-bound vs GPU-bound frame time.
+
+See:
+- [`examples/million-points/main.ts`](../examples/million-points/main.ts) (stats collection)
+- [`examples/million-points/index.html`](../examples/million-points/index.html) (readout UI)
 
 ## Decision: Option A (`queue.onSubmittedWorkDone()`)
 
@@ -22,29 +26,7 @@ GPU timing has been implemented in the `examples/million-points` benchmark using
 
 ## Implementation Details
 
-### Location
-- **File**: `examples/million-points/main.ts`
-- **Key changes**: Added GPU timing tracking in `renderLoop()` function
-
-### Code Pattern
-
-```typescript
-// CPU submit time (existing)
-const t0 = performance.now();
-coordinator.render();
-const t1 = performance.now();
-renderMs.push(t1 - t0);
-
-// GPU execution time (new)
-const device = gpuContext.device;
-device.queue.onSubmittedWorkDone().then(() => {
-  const gpuEnd = performance.now();
-  // GPU time = time from CPU submit completion to GPU work completion
-  gpuMs.push(gpuEnd - t1);
-}).catch(() => {
-  // Silently ignore errors (device lost, etc.)
-});
-```
+GPU time is sampled via `GPUDevice.queue.onSubmittedWorkDone()` after each `RenderCoordinator.render()` call in the benchmark loop.
 
 ### What It Measures
 
@@ -57,8 +39,8 @@ device.queue.onSubmittedWorkDone().then(() => {
   - GPU-CPU synchronization overhead
 
 **CPU Submit Time** (`renderMs`):
-- **Start**: Before `coordinator.render()` call
-- **End**: After `coordinator.render()` returns (includes `queue.submit()`)
+- **Start**: Before `RenderCoordinator.render()` call
+- **End**: After `RenderCoordinator.render()` returns (includes `queue.submit()`)
 - **Includes**: 
   - CPU-side render coordinator work
   - GPU command encoding
@@ -67,14 +49,13 @@ device.queue.onSubmittedWorkDone().then(() => {
 ### Performance Impact
 
 **Minimal overhead**:
-- Promise creation: ~0.001ms per frame
-- Promise resolution: Async callback (doesn't block render loop)
+- Promise creation: small per-sample overhead
+- Promise resolution: async callback (doesn't block render loop)
 - DOM updates: Throttled to 250ms intervals (already implemented)
 
-**Sampling strategy**:
-- GPU timing samples are collected every frame
-- Rolling average computed over 60 samples (1 second at 60 FPS)
-- DOM updates throttled to prevent UI jitter
+**Sampling strategy** (benchmark):
+- Rolling average computed over a short window
+- Readouts updated at a throttled interval to prevent UI jitter
 
 ### Interpreting the Stats
 
@@ -91,11 +72,6 @@ device.queue.onSubmittedWorkDone().then(() => {
 - If GPU time > CPU submit time: GPU is the bottleneck
 - If GPU time < CPU submit time: CPU is the bottleneck
 - If GPU time ≈ frame time: GPU is fully utilized
-
-**Example scenarios**:
-- **CPU-bound**: CPU submit = 20ms, GPU time = 5ms → CPU is bottleneck
-- **GPU-bound**: CPU submit = 5ms, GPU time = 20ms → GPU is bottleneck
-- **Balanced**: CPU submit = 10ms, GPU time = 10ms → Both are utilized
 
 ### Cross-Browser Compatibility
 
@@ -132,6 +108,6 @@ If more precise GPU timing is required, timestamp queries can be added:
 
 ## References
 
-- [WebGPU Specification: Queue](https://www.w3.org/TR/webgpu/#gpuqueue)
-- [WebGPU Specification: onSubmittedWorkDone](https://www.w3.org/TR/webgpu/#dom-gpuqueue-onsubmittedworkdone)
-- [WebGPU Specification: Timestamp Queries](https://www.w3.org/TR/webgpu/#timestamp-query)
+- [WebGPU Specification: `GPUQueue`](https://www.w3.org/TR/webgpu/#gpuqueue)
+- [WebGPU Specification: `onSubmittedWorkDone`](https://www.w3.org/TR/webgpu/#dom-gpuqueue-onsubmittedworkdone)
+- [WebGPU Specification: timestamp queries](https://www.w3.org/TR/webgpu/#timestamp-query)
