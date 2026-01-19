@@ -1,9 +1,26 @@
 {
   "name": "chartgpu",
-  "version": "1.0.0",
-  "description": "A GPU-accelerated charting library built with WebGPU",
+  "version": "0.1.0",
+  "description": "High-performance WebGPU charting library",
+  "keywords": [
+    "webgpu",
+    "chart",
+    "visualization",
+    "gpu",
+    "typescript",
+    "echarts"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hunterg325/ChartGPU.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hunterg325/ChartGPU/issues"
+  },
+  "homepage": "https://github.com/hunterg325/ChartGPU#readme",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
