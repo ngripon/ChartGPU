@@ -411,6 +411,14 @@ export interface TooltipConfig {
 }
 ```
 
+**Tooltip value tuples:**
+
+- Cartesian series (line, area, bar, scatter): `params.value` is `readonly [number, number]` for `[x, y]`.
+- Candlestick series: `params.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`.
+- Pie series: `params.value` is `readonly [number, number]` for `[0, sliceValue]`.
+
+Custom formatters can distinguish by checking `params.value.length` (2 for cartesian/pie, 5 for candlestick). See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for default implementations.
+
 Security note: tooltip content is assigned via `innerHTML`. Only return trusted/sanitized strings.
 
 Example (axis trigger):

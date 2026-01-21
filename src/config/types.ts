@@ -229,7 +229,12 @@ export interface TooltipParams {
   readonly seriesName: string;
   readonly seriesIndex: number;
   readonly dataIndex: number;
-  readonly value: [number, number];
+  /**
+   * Value tuple for the data point.
+   * - Cartesian series (line, area, bar, scatter): [x, y]
+   * - Candlestick series: [timestamp, open, close, low, high]
+   */
+  readonly value: readonly [number, number] | readonly [number, number, number, number, number];
   readonly color: string;
 }
 

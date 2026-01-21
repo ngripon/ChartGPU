@@ -136,9 +136,6 @@ const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } =>
   return { x: p.x, y: p.y };
 };
 
-const getOHLCTimestamp = (p: OHLCDataPoint): number => (isTupleOHLCDataPoint(p) ? p[0] : p.timestamp);
-const getOHLCClose = (p: OHLCDataPoint): number => (isTupleOHLCDataPoint(p) ? p[2] : p.close);
-
 const computeRawBoundsFromData = (data: ReadonlyArray<DataPoint>): Bounds | null => {
   let xMin = Number.POSITIVE_INFINITY;
   let xMax = Number.NEGATIVE_INFINITY;
@@ -835,6 +832,63 @@ const resolveAnimationConfig = (
 const resolveIntroAnimationConfig = (animation: ResolvedChartGPUOptions['animation']) => resolveAnimationConfig(animation);
 const resolveUpdateAnimationConfig = (animation: ResolvedChartGPUOptions['animation']) => resolveAnimationConfig(animation);
 
+/**
+ * Computes container-local CSS pixel anchor coordinates for a candlestick tooltip.
+ *
+ * The anchor is positioned near the candle body center for stable tooltip positioning
+ * even when the cursor is at the edge of the candlestick.
+ *
+ * Coordinate transformations:
+ * 1. Domain values (timestamp, open, close) from CandlestickMatch
+ * 2. → xScale/yScale transform to grid-local CSS pixels
+ * 3. → Add gridArea offset to get canvas-local CSS pixels
+ * 4. → Add canvas offset to get container-local CSS pixels
+ *
+ * Returns null if any coordinate computation fails (non-finite values).
+ */
+const computeCandlestickTooltipAnchor = (
+  match: { readonly point: OHLCDataPoint },
+  xScale: LinearScale,
+  yScale: LinearScale,
+  gridArea: GridArea,
+  canvas: HTMLCanvasElement
+): Readonly<{ x: number; y: number }> | null => {
+  const point = match.point;
+  
+  const timestamp = isTupleOHLCDataPoint(point) ? point[0] : point.timestamp;
+  const open = isTupleOHLCDataPoint(point) ? point[1] : point.open;
+  const close = isTupleOHLCDataPoint(point) ? point[2] : point.close;
+
+  if (!Number.isFinite(timestamp) || !Number.isFinite(open) || !Number.isFinite(close)) {
+    return null;
+  }
+
+  // Body center in domain space
+  const bodyMidY = (open + close) / 2;
+
+  // Transform to grid-local CSS pixels
+  const xGridCss = xScale.scale(timestamp);
+  const yGridCss = yScale.scale(bodyMidY);
+
+  if (!Number.isFinite(xGridCss) || !Number.isFinite(yGridCss)) {
+    return null;
+  }
+
+  // Convert to canvas-local CSS pixels
+  const xCanvasCss = gridArea.left + xGridCss;
+  const yCanvasCss = gridArea.top + yGridCss;
+
+  // Convert to container-local CSS pixels
+  const xContainerCss = canvas.offsetLeft + xCanvasCss;
+  const yContainerCss = canvas.offsetTop + yCanvasCss;
+
+  if (!Number.isFinite(xContainerCss) || !Number.isFinite(yContainerCss)) {
+    return null;
+  }
+
+  return { x: xContainerCss, y: yContainerCss };
+};
+
 const computeBaselineForBarsFromData = (seriesConfigs: ReadonlyArray<ResolvedBarSeriesConfig>): number => {
   let yMin = Number.POSITIVE_INFINITY;
   let yMax = Number.NEGATIVE_INFINITY;
@@ -1169,6 +1223,11 @@ export function createRenderCoordinator(
   // Tooltip is a DOM overlay element; enable by default unless explicitly disabled.
   let tooltip: Tooltip | null =
     overlayContainer && currentOptions.tooltip?.show !== false ? createTooltip(overlayContainer) : null;
+
+  // Cache tooltip state to avoid unnecessary DOM updates
+  let lastTooltipContent: string | null = null;
+  let lastTooltipX: number | null = null;
+  let lastTooltipY: number | null = null;
 
   legend?.update(currentOptions.series, currentOptions.theme);
 
@@ -1515,15 +1574,81 @@ export function createRenderCoordinator(
     point: OHLCDataPoint
   ): TooltipParams => {
     const s = currentOptions.series[seriesIndex];
-    const timestamp = getOHLCTimestamp(point);
-    const close = getOHLCClose(point);
-    return {
-      seriesName: s?.name ?? '',
-      seriesIndex,
-      dataIndex,
-      value: [timestamp, close],
-      color: s?.color ?? '#888',
-    };
+    if (isTupleOHLCDataPoint(point)) {
+      return {
+        seriesName: s?.name ?? '',
+        seriesIndex,
+        dataIndex,
+        value: [point[0], point[1], point[2], point[3], point[4]] as const,
+        color: s?.color ?? '#888',
+      };
+    } else {
+      return {
+        seriesName: s?.name ?? '',
+        seriesIndex,
+        dataIndex,
+        value: [point.timestamp, point.open, point.close, point.low, point.high] as const,
+        color: s?.color ?? '#888',
+      };
+    }
+  };
+
+  // Helper: Find pie slice at pointer position (extracted to avoid duplication)
+  const findPieSliceAtPointer = (
+    series: ResolvedChartGPUOptions['series'],
+    gridX: number,
+    gridY: number,
+    plotWidthCss: number,
+    plotHeightCss: number
+  ): ReturnType<typeof findPieSlice> | null => {
+    const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
+    if (!(maxRadiusCss > 0)) return null;
+
+    for (let i = currentOptions.series.length - 1; i >= 0; i--) {
+      const s = series[i];
+      if (s.type !== 'pie') continue;
+      const pieSeries = s as ResolvedPieSeriesConfig;
+      const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
+      const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
+      const m = findPieSlice(gridX, gridY, { seriesIndex: i, series: pieSeries }, center, radii);
+      if (m) return m;
+    }
+    return null;
+  };
+
+  // Helper: Find candlestick match at pointer position (hoisted to avoid closure allocation)
+  const findCandlestickAtPointer = (
+    series: ResolvedChartGPUOptions['series'],
+    gridX: number,
+    gridY: number,
+    interactionScales: NonNullable<ReturnType<typeof computeInteractionScalesGridCssPx>>
+  ): { params: TooltipParams; match: { point: OHLCDataPoint }; seriesIndex: number } | null => {
+    for (let i = series.length - 1; i >= 0; i--) {
+      const s = series[i];
+      if (s.type !== 'candlestick') continue;
+
+      const cs = s as ResolvedCandlestickSeriesConfig;
+      const barWidthClip = computeCandlestickBodyWidthRange(
+        cs,
+        cs.data,
+        interactionScales.xScale,
+        interactionScales.plotWidthCss
+      );
+
+      const m = findCandlestick(
+        [cs],
+        gridX,
+        gridY,
+        interactionScales.xScale,
+        interactionScales.yScale,
+        barWidthClip
+      );
+      if (!m) continue;
+
+      const params = buildCandlestickTooltipParams(i, m.dataIndex, m.point);
+      return { params, match: { point: m.point }, seriesIndex: i };
+    }
+    return null;
   };
 
   const onMouseMove = (payload: ChartGPUEventPayload): void => {
@@ -1558,6 +1683,9 @@ export function createRenderCoordinator(
 
     pointerState = { ...pointerState, isInGrid: false, hasPointer: false };
     crosshairRenderer.setVisible(false);
+    lastTooltipContent = null;
+    lastTooltipX = null;
+    lastTooltipY = null;
     tooltip?.hide();
     setInteractionXInternal(null, 'mouse');
     requestRender();
@@ -1938,9 +2066,22 @@ export function createRenderCoordinator(
     // Tooltip enablement may change at runtime.
     if (overlayContainer) {
       const shouldHaveTooltip = currentOptions.tooltip?.show !== false;
-      if (shouldHaveTooltip && !tooltip) tooltip = createTooltip(overlayContainer);
-      if (!shouldHaveTooltip && tooltip) tooltip.hide();
+      if (shouldHaveTooltip && !tooltip) {
+        tooltip = createTooltip(overlayContainer);
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
+      }
+      if (!shouldHaveTooltip && tooltip) {
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
+        tooltip.hide();
+      }
     } else {
+      lastTooltipContent = null;
+      lastTooltipX = null;
+      lastTooltipY = null;
       tooltip?.hide();
     }
 
@@ -2358,36 +2499,6 @@ export function createRenderCoordinator(
         const containerX = canvas.offsetLeft + effectivePointer.x;
         const containerY = canvas.offsetTop + effectivePointer.y;
 
-        const tryFindCandlestickParams = (): TooltipParams | null => {
-          // Candlestick body-only hit-testing (wicks ignored), using grid-local CSS px.
-          for (let i = seriesForRender.length - 1; i >= 0; i--) {
-            const s = seriesForRender[i];
-            if (s.type !== 'candlestick') continue;
-
-            const cs = s as ResolvedCandlestickSeriesConfig;
-            const barWidthClip = computeCandlestickBodyWidthRange(
-              cs,
-              cs.data,
-              interactionScales.xScale,
-              interactionScales.plotWidthCss
-            );
-
-            const m = findCandlestick(
-              [cs],
-              effectivePointer.gridX,
-              effectivePointer.gridY,
-              interactionScales.xScale,
-              interactionScales.yScale,
-              barWidthClip
-            );
-            if (!m) continue;
-
-            // Prefer later series indices to match visual stacking order.
-            return buildCandlestickTooltipParams(i, m.dataIndex, m.point);
-          }
-          return null;
-        };
-
         if (effectivePointer.source === 'sync') {
           // Sync semantics:
           // - Tooltip should be driven by x only (no y).
@@ -2395,47 +2506,52 @@ export function createRenderCoordinator(
           // - In 'item' mode, pick a deterministic single entry (first matching series).
           const matches = findPointsAtX(seriesForRender, effectivePointer.gridX, interactionScales.xScale);
           if (matches.length === 0) {
+            lastTooltipContent = null;
+            lastTooltipX = null;
+            lastTooltipY = null;
             tooltip.hide();
           } else if (trigger === 'axis') {
             const paramsArray = matches.map((m) => buildTooltipParams(m.seriesIndex, m.dataIndex, m.point));
             const content = formatter
               ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
               : formatTooltipAxis(paramsArray);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
             const m0 = matches[0];
             const params = buildTooltipParams(m0.seriesIndex, m0.dataIndex, m0.point);
             const content = formatter ? (formatter as (p: TooltipParams) => string)(params) : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           }
         } else if (trigger === 'axis') {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
-          const pieMatch = (() => {
-            const plotWidthCss = interactionScales.plotWidthCss;
-            const plotHeightCss = interactionScales.plotHeightCss;
-            const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
-            if (!(maxRadiusCss > 0)) return null;
-
-            for (let i = currentOptions.series.length - 1; i >= 0; i--) {
-              const s = seriesForRender[i];
-              if (s.type !== 'pie') continue;
-              const pieSeries = s as ResolvedPieSeriesConfig;
-              const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
-              const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
-              const m = findPieSlice(
-                effectivePointer.gridX,
-                effectivePointer.gridY,
-                { seriesIndex: i, series: pieSeries },
-                center,
-                radii
-              );
-              if (m) return m;
-            }
-            return null;
-          })();
+          const pieMatch = findPieSliceAtPointer(
+            seriesForRender,
+            effectivePointer.gridX,
+            effectivePointer.gridY,
+            interactionScales.plotWidthCss,
+            interactionScales.plotHeightCss
+          );
 
           if (pieMatch) {
             const params: TooltipParams = {
@@ -2449,60 +2565,109 @@ export function createRenderCoordinator(
             const content = formatter
               ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)([params])
               : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
             // Candlestick body hit-testing (mouse, axis trigger): include only when inside candle body.
-            const candlestickParams = tryFindCandlestickParams();
+            const candlestickResult = findCandlestickAtPointer(
+              seriesForRender,
+              effectivePointer.gridX,
+              effectivePointer.gridY,
+              interactionScales
+            );
 
             const matches = findPointsAtX(seriesForRender, effectivePointer.gridX, interactionScales.xScale);
             if (matches.length === 0) {
-              if (candlestickParams) {
-                const paramsArray = [candlestickParams];
+              if (candlestickResult) {
+                const paramsArray = [candlestickResult.params];
                 const content = formatter
                   ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
                   : formatTooltipAxis(paramsArray);
-                if (content) tooltip.show(containerX, containerY, content);
-                else tooltip.hide();
+                if (content) {
+                  // Use candlestick anchor for tooltip positioning
+                  const anchor = computeCandlestickTooltipAnchor(
+                    candlestickResult.match,
+                    interactionScales.xScale,
+                    interactionScales.yScale,
+                    gridArea,
+                    canvas
+                  );
+                  const tooltipX = anchor?.x ?? containerX;
+                  const tooltipY = anchor?.y ?? containerY;
+                  if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                    lastTooltipContent = content;
+                    lastTooltipX = tooltipX;
+                    lastTooltipY = tooltipY;
+                    tooltip.show(tooltipX, tooltipY, content);
+                  }
+                } else {
+                  lastTooltipContent = null;
+                  lastTooltipX = null;
+                  lastTooltipY = null;
+                  tooltip.hide();
+                }
               } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
                 tooltip.hide();
               }
             } else {
               const paramsArray = matches.map((m) => buildTooltipParams(m.seriesIndex, m.dataIndex, m.point));
-              if (candlestickParams) paramsArray.push(candlestickParams);
+              if (candlestickResult) paramsArray.push(candlestickResult.params);
               const content = formatter
                 ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
                 : formatTooltipAxis(paramsArray);
-              if (content) tooltip.show(containerX, containerY, content);
-              else tooltip.hide();
+              if (content) {
+                // Use candlestick anchor if candlestick is present in tooltip
+                let tooltipX = containerX;
+                let tooltipY = containerY;
+                if (candlestickResult) {
+                  const anchor = computeCandlestickTooltipAnchor(
+                    candlestickResult.match,
+                    interactionScales.xScale,
+                    interactionScales.yScale,
+                    gridArea,
+                    canvas
+                  );
+                  if (anchor) {
+                    tooltipX = anchor.x;
+                    tooltipY = anchor.y;
+                  }
+                }
+                if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                  lastTooltipContent = content;
+                  lastTooltipX = tooltipX;
+                  lastTooltipY = tooltipY;
+                  tooltip.show(tooltipX, tooltipY, content);
+                }
+              } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
             }
           }
         } else {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
-          const pieMatch = (() => {
-            const plotWidthCss = interactionScales.plotWidthCss;
-            const plotHeightCss = interactionScales.plotHeightCss;
-            const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
-            if (!(maxRadiusCss > 0)) return null;
-
-            for (let i = currentOptions.series.length - 1; i >= 0; i--) {
-              const s = seriesForRender[i];
-              if (s.type !== 'pie') continue;
-              const pieSeries = s as ResolvedPieSeriesConfig;
-              const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
-              const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
-              const m = findPieSlice(
-                effectivePointer.gridX,
-                effectivePointer.gridY,
-                { seriesIndex: i, series: pieSeries },
-                center,
-                radii
-              );
-              if (m) return m;
-            }
-            return null;
-          })();
+          const pieMatch = findPieSliceAtPointer(
+            seriesForRender,
+            effectivePointer.gridX,
+            effectivePointer.gridY,
+            interactionScales.plotWidthCss,
+            interactionScales.plotHeightCss
+          );
 
           if (pieMatch) {
             const params: TooltipParams = {
@@ -2515,17 +2680,52 @@ export function createRenderCoordinator(
             const content = formatter
               ? (formatter as (p: TooltipParams) => string)(params)
               : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
             // Candlestick body hit-testing (mouse, item trigger): prefer candle body over nearest-point logic.
-            const candlestickParams = tryFindCandlestickParams();
-            if (candlestickParams) {
+            const candlestickResult = findCandlestickAtPointer(
+              seriesForRender,
+              effectivePointer.gridX,
+              effectivePointer.gridY,
+              interactionScales
+            );
+            if (candlestickResult) {
               const content = formatter
-                ? (formatter as (p: TooltipParams) => string)(candlestickParams)
-                : formatTooltipItem(candlestickParams);
-              if (content) tooltip.show(containerX, containerY, content);
-              else tooltip.hide();
+                ? (formatter as (p: TooltipParams) => string)(candlestickResult.params)
+                : formatTooltipItem(candlestickResult.params);
+              if (content) {
+                // Use candlestick anchor for tooltip positioning
+                const anchor = computeCandlestickTooltipAnchor(
+                  candlestickResult.match,
+                  interactionScales.xScale,
+                  interactionScales.yScale,
+                  gridArea,
+                  canvas
+                );
+                const tooltipX = anchor?.x ?? containerX;
+                const tooltipY = anchor?.y ?? containerY;
+                if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                  lastTooltipContent = content;
+                  lastTooltipX = tooltipX;
+                  lastTooltipY = tooltipY;
+                  tooltip.show(tooltipX, tooltipY, content);
+                }
+              } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
               return;
             }
 
@@ -2537,21 +2737,39 @@ export function createRenderCoordinator(
               interactionScales.yScale
             );
             if (!match) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
               tooltip.hide();
             } else {
               const params = buildTooltipParams(match.seriesIndex, match.dataIndex, match.point);
               const content = formatter
                 ? (formatter as (p: TooltipParams) => string)(params)
                 : formatTooltipItem(params);
-              if (content) tooltip.show(containerX, containerY, content);
-              else tooltip.hide();
+              if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+                lastTooltipContent = content;
+                lastTooltipX = containerX;
+                lastTooltipY = containerY;
+                tooltip.show(containerX, containerY, content);
+              } else if (!content) {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
             }
           }
         }
       } else {
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
         tooltip.hide();
       }
     } else {
+      lastTooltipContent = null;
+      lastTooltipX = null;
+      lastTooltipY = null;
       tooltip?.hide();
     }
 

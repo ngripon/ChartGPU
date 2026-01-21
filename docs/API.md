@@ -190,7 +190,7 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 - **Enablement**: when `tooltip.show !== false`, ChartGPU creates an internal DOM tooltip overlay and updates it on hover; when `tooltip.show === false`, the tooltip is not shown.
 - **Hover behavior**: tooltip updates on pointer movement within the plot grid and hides on pointer leave. For cartesian series it uses cartesian hit-testing (see [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts) and [`findPointsAtX.ts`](../src/interaction/findPointsAtX.ts)); for pie series it uses pie slice hit-testing (see [`findPieSlice.ts`](../src/interaction/findPieSlice.ts)). See the tooltip logic in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 - **`TooltipConfig.trigger?: 'item' | 'axis'`**: tooltip trigger mode.
-- **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`).
+- **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`). The `value` field is a readonly tuple: `[x, y]` for cartesian series (line, area, bar, scatter), or `[timestamp, open, close, low, high]` for candlestick series. Custom formatters can distinguish by checking `params.value.length` (2 vs 5). See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for the default formatter implementations.
 
 **Animation (type definitions):**
 
@@ -231,6 +231,14 @@ For a minimal acceptance check (0→100 over 300ms with easing), see [`examples/
 
 **`TooltipParams` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`types.ts`](../src/config/types.ts).
 
+Tooltip value tuples:
+
+- **Cartesian series** (line, area, bar, scatter): `params.value` is `readonly [number, number]` for `[x, y]`.
+- **Candlestick series**: `params.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`.
+- **Pie series**: `params.value` is `readonly [number, number]` for `[0, sliceValue]` (non-cartesian; x-slot is `0`).
+
+Custom formatters can distinguish series types by checking `params.value.length` or by using a type guard. See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for examples.
+
 **`OHLCDataPoint` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`types.ts`](../src/config/types.ts). Represents a candlestick data point as either a tuple (`readonly [timestamp, open, close, low, high]`, ECharts order) or an object (`Readonly<{ timestamp, open, close, low, high }>`). Used by `CandlestickSeriesConfig`. Both candlestick rendering and OHLC sampling are fully functional (see **CandlestickSeriesConfig** above).
 
 **`candlestickDefaults` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`defaults.ts`](../src/config/defaults.ts). Provides default configuration values for candlestick series. Both candlestick rendering and OHLC sampling are fully functional (see **CandlestickSeriesConfig** above).
@@ -239,7 +247,8 @@ Default tooltip formatter helpers are available in [`formatTooltip.ts`](../src/c
 
 Notes:
 
-- For pie slice tooltips, `TooltipParams.seriesName` uses the slice `name` (not the series `name`), and `TooltipParams.value` is `[0, sliceValue]`. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- For pie slice tooltips, `TooltipParams.seriesName` uses the slice `name` (not the series `name`), and `TooltipParams.value` is `readonly [number, number]` for `[0, sliceValue]` (pie is non-cartesian; the x-slot is `0`). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- For candlestick tooltips, `TooltipParams.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`. See [`formatTooltip.ts`](../src/components/formatTooltip.ts).
 
 **Content safety (important)**: the tooltip overlay assigns `content` via `innerHTML`. Only return trusted/sanitized strings from `TooltipConfig.formatter`. See the internal tooltip overlay helper in [`createTooltip.ts`](../src/components/createTooltip.ts) and the default formatter helpers in [`formatTooltip.ts`](../src/components/formatTooltip.ts).
 
