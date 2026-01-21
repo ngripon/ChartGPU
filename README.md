@@ -13,8 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/npm/v/chartgpu" alt="npm">
-  <img src="https://img.shields.io/npm/l/chartgpu" alt="license">
+  <a href="https://www.npmjs.com/package/chartgpu">
+    <img src="https://img.shields.io/npm/v/chartgpu" alt="npm">
+  </a>
+  <a href="https://github.com/hunterg325/ChartGPU/blob/main/LICENSE">
+    <img src="https://img.shields.io/npm/l/chartgpu" alt="license">
+  </a>
   <a href="https://chartgpu.github.io/ChartGPU/">
     <img src="https://img.shields.io/badge/demo-live-brightgreen" alt="Live Demo">
   </a>
