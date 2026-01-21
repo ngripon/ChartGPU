@@ -2,11 +2,12 @@ import { GPUContext } from './core/GPUContext';
 import { createRenderCoordinator } from './core/createRenderCoordinator';
 import type { RenderCoordinator } from './core/createRenderCoordinator';
 import { resolveOptions } from './config/OptionResolver';
-import type { ResolvedChartGPUOptions, ResolvedPieSeriesConfig } from './config/OptionResolver';
-import type { ChartGPUOptions, DataPoint, DataPointTuple, PieCenter, PieRadius } from './config/types';
+import type { ResolvedCandlestickSeriesConfig, ResolvedChartGPUOptions, ResolvedPieSeriesConfig } from './config/OptionResolver';
+import type { ChartGPUOptions, DataPoint, DataPointTuple, OHLCDataPoint, OHLCDataPointTuple, PieCenter, PieRadius } from './config/types';
 import { createDataZoomSlider } from './components/createDataZoomSlider';
 import type { DataZoomSlider } from './components/createDataZoomSlider';
 import type { ZoomRange, ZoomState } from './interaction/createZoomState';
+import { computeCandlestickBodyWidthRange, findCandlestick } from './interaction/findCandlestick';
 import { findNearestPoint } from './interaction/findNearestPoint';
 import type { NearestPointMatch } from './interaction/findNearestPoint';
 import { findPieSlice } from './interaction/findPieSlice';
@@ -21,9 +22,11 @@ export interface ChartGPUInstance {
   /**
    * Appends new points to a cartesian series at runtime (streaming).
    *
-   * Pie series are non-cartesian and are currently not supported by streaming append.
+   * For candlestick series, pass `OHLCDataPoint[]`.
+   * For other cartesian series (line, area, bar, scatter), pass `DataPoint[]`.
+   * Pie series are non-cartesian and are not supported by streaming append.
    */
-  appendData(seriesIndex: number, newPoints: DataPoint[]): void;
+  appendData(seriesIndex: number, newPoints: DataPoint[] | OHLCDataPoint[]): void;
   resize(): void;
   dispose(): void;
   on(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
@@ -109,11 +112,15 @@ const DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX = 8;
 const DATA_ZOOM_SLIDER_RESERVE_CSS_PX = DATA_ZOOM_SLIDER_HEIGHT_CSS_PX + DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX;
 
 const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
+const isTupleOHLCDataPoint = (p: OHLCDataPoint): p is OHLCDataPointTuple => Array.isArray(p);
 
 const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } => {
   if (isTupleDataPoint(p)) return { x: p[0], y: p[1] };
   return { x: p.x, y: p.y };
 };
+
+const getOHLCTimestamp = (p: OHLCDataPoint): number => (isTupleOHLCDataPoint(p) ? p[0] : p.timestamp);
+const getOHLCClose = (p: OHLCDataPoint): number => (isTupleOHLCDataPoint(p) ? p[2] : p.close);
 
 const hasSliderDataZoom = (options: ChartGPUOptions): boolean => options.dataZoom?.some((z) => z?.type === 'slider') ?? false;
 
@@ -192,6 +199,38 @@ const extendBoundsWithDataPoints = (bounds: Bounds | null, points: ReadonlyArray
     if (x > xMax) xMax = x;
     if (y < yMin) yMin = y;
     if (y > yMax) yMax = y;
+  }
+
+  // Keep bounds usable for downstream scale derivation.
+  if (xMin === xMax) xMax = xMin + 1;
+  if (yMin === yMax) yMax = yMin + 1;
+
+  return { xMin, xMax, yMin, yMax };
+};
+
+const extendBoundsWithOHLCDataPoints = (bounds: Bounds | null, points: ReadonlyArray<OHLCDataPoint>): Bounds | null => {
+  if (points.length === 0) return bounds;
+
+  let xMin = bounds?.xMin ?? Number.POSITIVE_INFINITY;
+  let xMax = bounds?.xMax ?? Number.NEGATIVE_INFINITY;
+  let yMin = bounds?.yMin ?? Number.POSITIVE_INFINITY;
+  let yMax = bounds?.yMax ?? Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    const timestamp = getOHLCTimestamp(p);
+    const low = isTupleOHLCDataPoint(p) ? p[3] : p.low;
+    const high = isTupleOHLCDataPoint(p) ? p[4] : p.high;
+
+    if (!Number.isFinite(timestamp) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+    if (timestamp < xMin) xMin = timestamp;
+    if (timestamp > xMax) xMax = timestamp;
+    if (low < yMin) yMin = low;
+    if (high > yMax) yMax = high;
+  }
+
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return bounds;
   }
 
   // Keep bounds usable for downstream scale derivation.
@@ -308,7 +347,14 @@ type PieHitTestMatch = Readonly<{
   sliceValue: number;
 }>;
 
-type HitTestMatch = CartesianHitTestMatch | PieHitTestMatch;
+type CandlestickHitTestMatch = Readonly<{
+  kind: 'candlestick';
+  seriesIndex: number;
+  dataIndex: number;
+  point: OHLCDataPoint;
+}>;
+
+type HitTestMatch = CartesianHitTestMatch | PieHitTestMatch | CandlestickHitTestMatch;
 
 const parseNumberOrPercent = (value: number | string, basis: number): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -413,7 +459,7 @@ export async function createChartGPU(
   // Chart-owned runtime series store for hit-testing only (cartesian only).
   // - `runtimeRawDataByIndex[i]` is a mutable array used to reflect streaming appends.
   // - `runtimeRawBoundsByIndex[i]` is incrementally updated to keep scale/bounds derivation cheap.
-  let runtimeRawDataByIndex: DataPoint[][] = new Array(resolvedOptions.series.length).fill(null).map(() => []);
+  let runtimeRawDataByIndex: Array<DataPoint[] | OHLCDataPoint[]> = new Array(resolvedOptions.series.length).fill(null).map(() => []);
   let runtimeRawBoundsByIndex: Array<Bounds | null> = new Array(resolvedOptions.series.length).fill(null);
   let runtimeHitTestSeriesCache: ResolvedChartGPUOptions['series'] | null = null;
   let runtimeHitTestSeriesVersion = 0;
@@ -428,9 +474,15 @@ export async function createChartGPU(
       const s = resolvedOptions.series[i]!;
       if (s.type === 'pie') continue;
 
-      const raw = ((s as unknown as { rawData?: ReadonlyArray<DataPoint> }).rawData ?? s.data) as ReadonlyArray<DataPoint>;
-      runtimeRawDataByIndex[i] = raw.length === 0 ? [] : raw.slice();
-      runtimeRawBoundsByIndex[i] = ((s as unknown as { rawBounds?: Bounds | null }).rawBounds ?? null) ?? computeRawBoundsFromData(raw);
+      if (s.type === 'candlestick') {
+        const raw = ((s as unknown as { rawData?: ReadonlyArray<OHLCDataPoint> }).rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>;
+        runtimeRawDataByIndex[i] = raw.length === 0 ? [] : raw.slice();
+        runtimeRawBoundsByIndex[i] = ((s as unknown as { rawBounds?: Bounds | null }).rawBounds ?? null);
+      } else {
+        const raw = ((s as unknown as { rawData?: ReadonlyArray<DataPoint> }).rawData ?? s.data) as ReadonlyArray<DataPoint>;
+        runtimeRawDataByIndex[i] = raw.length === 0 ? [] : raw.slice();
+        runtimeRawBoundsByIndex[i] = ((s as unknown as { rawBounds?: Bounds | null }).rawBounds ?? null) ?? computeRawBoundsFromData(raw);
+      }
     }
   };
 
@@ -439,6 +491,9 @@ export async function createChartGPU(
     // Replace cartesian series `data` with chart-owned runtime data (pie series are unchanged).
     runtimeHitTestSeriesCache = resolvedOptions.series.map((s, i) => {
       if (s.type === 'pie') return s;
+      if (s.type === 'candlestick') {
+        return { ...s, data: runtimeRawDataByIndex[i] ?? (s.data as ReadonlyArray<OHLCDataPoint>) };
+      }
       return { ...s, data: runtimeRawDataByIndex[i] ?? (s.data as ReadonlyArray<DataPoint>) };
     }) as ResolvedChartGPUOptions['series'];
     return runtimeHitTestSeriesCache;
@@ -795,6 +850,22 @@ export async function createChartGPU(
 
     if (pieMatch) return { match: pieMatch, isInGrid: true };
 
+    // Candlestick body hit-testing (grid-local CSS px), prefer later series indices.
+    for (let i = resolvedOptions.series.length - 1; i >= 0; i--) {
+      const s = resolvedOptions.series[i];
+      if (s?.type !== 'candlestick') continue;
+
+      const seriesCfg = s as ResolvedCandlestickSeriesConfig;
+      const barWidthRange = computeCandlestickBodyWidthRange(seriesCfg, seriesCfg.data, scales.xScale, plotWidthCss);
+      const m = findCandlestick([seriesCfg], gridX, gridY, scales.xScale, scales.yScale, barWidthRange);
+      if (!m) continue;
+
+      return {
+        match: { kind: 'candlestick', seriesIndex: i, dataIndex: m.dataIndex, point: m.point },
+        isInGrid: true,
+      };
+    }
+
     const cartesianMatch = findNearestPoint(
       getRuntimeHitTestSeries(),
       gridX,
@@ -827,6 +898,18 @@ export async function createChartGPU(
         seriesIndex,
         dataIndex,
         value: [0, match.sliceValue],
+        seriesName,
+        event,
+      };
+    }
+
+    if (match.kind === 'candlestick') {
+      const timestamp = getOHLCTimestamp(match.point);
+      const close = getOHLCClose(match.point);
+      return {
+        seriesIndex,
+        dataIndex,
+        value: [timestamp, close],
         seriesName,
         event,
       };
@@ -1062,11 +1145,28 @@ export async function createChartGPU(
       // hit-testing runtime store in sync.
       coordinator?.appendData(seriesIndex, newPoints);
 
-      const owned = runtimeRawDataByIndex[seriesIndex] ?? [];
-      owned.push(...newPoints);
-      runtimeRawDataByIndex[seriesIndex] = owned;
+      if (s.type === 'candlestick') {
+        // Handle candlestick series with OHLC data points.
+        const owned = (runtimeRawDataByIndex[seriesIndex] ?? []) as OHLCDataPoint[];
+        owned.push(...(newPoints as OHLCDataPoint[]));
+        runtimeRawDataByIndex[seriesIndex] = owned;
 
-      runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(runtimeRawBoundsByIndex[seriesIndex], newPoints);
+        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithOHLCDataPoints(
+          runtimeRawBoundsByIndex[seriesIndex],
+          newPoints as OHLCDataPoint[]
+        );
+      } else {
+        // Handle other cartesian series (line, area, bar, scatter).
+        const owned = (runtimeRawDataByIndex[seriesIndex] ?? []) as DataPoint[];
+        owned.push(...(newPoints as DataPoint[]));
+        runtimeRawDataByIndex[seriesIndex] = owned;
+
+        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(
+          runtimeRawBoundsByIndex[seriesIndex],
+          newPoints as DataPoint[]
+        );
+      }
+
       cachedGlobalBounds = computeGlobalBounds(resolvedOptions.series, runtimeRawBoundsByIndex);
 
       runtimeHitTestSeriesCache = null;

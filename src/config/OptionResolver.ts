@@ -1,12 +1,17 @@
 import type {
   AreaStyleConfig,
   AxisConfig,
+  CandlestickItemStyleConfig,
+  CandlestickSeriesConfig,
+  CandlestickStyle,
   ChartGPUOptions,
   DataPoint,
   DataPointTuple,
   DataZoomConfig,
   GridConfig,
   LineStyleConfig,
+  OHLCDataPoint,
+  OHLCDataPointTuple,
   AreaSeriesConfig,
   BarSeriesConfig,
   LineSeriesConfig,
@@ -15,10 +20,11 @@ import type {
   ScatterSeriesConfig,
   SeriesSampling,
 } from './types';
-import { defaultAreaStyle, defaultLineStyle, defaultOptions, defaultPalette } from './defaults';
+import { candlestickDefaults, defaultAreaStyle, defaultLineStyle, defaultOptions, defaultPalette } from './defaults';
 import { getTheme } from '../themes';
 import type { ThemeConfig } from '../themes/types';
 import { sampleSeriesDataPoints } from '../data/sampleSeries';
+import { ohlcSample } from '../data/ohlcSample';
 
 export type ResolvedGridConfig = Readonly<Required<GridConfig>>;
 export type ResolvedLineStyleConfig = Readonly<Required<Omit<LineStyleConfig, 'color'>> & { readonly color: string }>;
@@ -107,12 +113,36 @@ export type ResolvedPieSeriesConfig = Readonly<
   }
 >;
 
+export type ResolvedCandlestickItemStyleConfig = Readonly<Required<CandlestickItemStyleConfig>>;
+
+export type ResolvedCandlestickSeriesConfig = Readonly<
+  Omit<CandlestickSeriesConfig, 'color' | 'style' | 'itemStyle' | 'barWidth' | 'barMinWidth' | 'barMaxWidth' | 'sampling' | 'samplingThreshold' | 'data'> & {
+    readonly color: string;
+    readonly style: CandlestickStyle;
+    readonly itemStyle: ResolvedCandlestickItemStyleConfig;
+    readonly barWidth: number | string;
+    readonly barMinWidth: number;
+    readonly barMaxWidth: number;
+    readonly sampling: 'none' | 'ohlc';
+    readonly samplingThreshold: number;
+    /** Original (unsampled) series data. */
+    readonly rawData: Readonly<CandlestickSeriesConfig['data']>;
+    readonly data: Readonly<CandlestickSeriesConfig['data']>;
+    /**
+     * Bounds computed from the original (unsampled) data. Used for axis auto-bounds so sampling
+     * cannot clip outliers.
+     */
+    readonly rawBounds?: RawBounds;
+  }
+>;
+
 export type ResolvedSeriesConfig =
   | ResolvedLineSeriesConfig
   | ResolvedAreaSeriesConfig
   | ResolvedBarSeriesConfig
   | ResolvedScatterSeriesConfig
-  | ResolvedPieSeriesConfig;
+  | ResolvedPieSeriesConfig
+  | ResolvedCandlestickSeriesConfig;
 
 export interface ResolvedChartGPUOptions
   extends Omit<ChartGPUOptions, 'grid' | 'xAxis' | 'yAxis' | 'theme' | 'palette' | 'series'> {
@@ -213,9 +243,15 @@ const normalizeOptionalColor = (color: unknown): string | undefined => {
 const normalizeSampling = (value: unknown): SeriesSampling | undefined => {
   if (typeof value !== 'string') return undefined;
   const v = value.trim().toLowerCase();
-  return v === 'none' || v === 'lttb' || v === 'average' || v === 'max' || v === 'min'
+  return v === 'none' || v === 'lttb' || v === 'average' || v === 'max' || v === 'min' || v === 'ohlc'
     ? (v as SeriesSampling)
     : undefined;
+};
+
+const normalizeCandlestickSampling = (value: unknown): 'none' | 'ohlc' | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const v = value.trim().toLowerCase();
+  return v === 'none' || v === 'ohlc' ? (v as 'none' | 'ohlc') : undefined;
 };
 
 const normalizeSamplingThreshold = (value: unknown): number | undefined => {
@@ -254,6 +290,70 @@ const computeRawBoundsFromData = (data: ReadonlyArray<DataPoint>): RawBounds | u
   return { xMin, xMax, yMin, yMax };
 };
 
+const isTupleOHLCDataPoint = (p: OHLCDataPoint): p is OHLCDataPointTuple => Array.isArray(p);
+
+const computeRawBoundsFromOHLC = (data: ReadonlyArray<OHLCDataPoint>): RawBounds | undefined => {
+  if (data.length === 0) return undefined;
+
+  let xMin = Number.POSITIVE_INFINITY;
+  let xMax = Number.NEGATIVE_INFINITY;
+  let yMin = Number.POSITIVE_INFINITY;
+  let yMax = Number.NEGATIVE_INFINITY;
+
+  // Hoist tuple-vs-object detection once (assume homogeneous arrays).
+  const isTuple = isTupleOHLCDataPoint(data[0]!);
+
+  if (isTuple) {
+    // Tuple format path: [timestamp, open, close, low, high]
+    const dataAsTuples = data as ReadonlyArray<OHLCDataPointTuple>;
+
+    for (let i = 0; i < dataAsTuples.length; i++) {
+      const p = dataAsTuples[i]!;
+      const x = p[0];
+      const low = p[3];
+      const high = p[4];
+      if (!Number.isFinite(x) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+
+      const yLow = Math.min(low, high);
+      const yHigh = Math.max(low, high);
+
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (yLow < yMin) yMin = yLow;
+      if (yHigh > yMax) yMax = yHigh;
+    }
+  } else {
+    // Object format path: { timestamp, open, close, low, high }
+    const dataAsObjects = data as ReadonlyArray<Exclude<OHLCDataPoint, OHLCDataPointTuple>>;
+
+    for (let i = 0; i < dataAsObjects.length; i++) {
+      const p = dataAsObjects[i]!;
+      const x = p.timestamp;
+      const low = p.low;
+      const high = p.high;
+      if (!Number.isFinite(x) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+
+      const yLow = Math.min(low, high);
+      const yHigh = Math.max(low, high);
+
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (yLow < yMin) yMin = yLow;
+      if (yHigh > yMax) yMax = yHigh;
+    }
+  }
+
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return undefined;
+  }
+
+  // Keep bounds usable for downstream scale derivation.
+  if (xMin === xMax) xMax = xMin + 1;
+  if (yMin === yMax) yMax = yMin + 1;
+
+  return { xMin, xMax, yMin, yMax };
+};
+
 const assertUnreachable = (value: never): never => {
   // Should never happen if SeriesConfig union is exhaustively handled.
   // This is defensive runtime safety for JS callers / invalid inputs.
@@ -262,6 +362,16 @@ const assertUnreachable = (value: never): never => {
       (value as unknown as { readonly type?: unknown } | null)?.type ?? 'unknown'
     }`
   );
+};
+
+let candlestickWarned = false;
+const warnCandlestickNotImplemented = (): void => {
+  if (!candlestickWarned) {
+    console.warn(
+      'ChartGPU: Candlestick series rendering is not yet implemented. Series will be skipped.'
+    );
+    candlestickWarned = true;
+  }
 };
 
 export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChartGPUOptions {
@@ -435,6 +545,49 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         });
 
         return { ...rest, color, data: resolvedData };
+      }
+      case 'candlestick': {
+        warnCandlestickNotImplemented();
+
+        const resolvedSampling: 'none' | 'ohlc' =
+          normalizeCandlestickSampling((s as unknown as { sampling?: unknown }).sampling) ??
+          candlestickDefaults.sampling;
+        
+        const resolvedSamplingThreshold: number =
+          normalizeSamplingThreshold((s as unknown as { samplingThreshold?: unknown }).samplingThreshold) ??
+          candlestickDefaults.samplingThreshold;
+
+        const resolvedItemStyle: ResolvedCandlestickItemStyleConfig = {
+          upColor: normalizeOptionalColor(s.itemStyle?.upColor) ?? candlestickDefaults.itemStyle.upColor,
+          downColor: normalizeOptionalColor(s.itemStyle?.downColor) ?? candlestickDefaults.itemStyle.downColor,
+          upBorderColor: normalizeOptionalColor(s.itemStyle?.upBorderColor) ?? candlestickDefaults.itemStyle.upBorderColor,
+          downBorderColor: normalizeOptionalColor(s.itemStyle?.downBorderColor) ?? candlestickDefaults.itemStyle.downBorderColor,
+          borderWidth: typeof s.itemStyle?.borderWidth === 'number' && Number.isFinite(s.itemStyle.borderWidth)
+            ? s.itemStyle.borderWidth
+            : candlestickDefaults.itemStyle.borderWidth,
+        };
+
+        const rawBounds = computeRawBoundsFromOHLC(s.data);
+
+        const sampledData =
+          resolvedSampling === 'ohlc' && s.data.length > resolvedSamplingThreshold
+            ? ohlcSample(s.data, resolvedSamplingThreshold)
+            : s.data;
+
+        return {
+          ...s,
+          rawData: s.data,
+          data: sampledData,
+          color,
+          style: s.style ?? candlestickDefaults.style,
+          itemStyle: resolvedItemStyle,
+          barWidth: s.barWidth ?? candlestickDefaults.barWidth,
+          barMinWidth: s.barMinWidth ?? candlestickDefaults.barMinWidth,
+          barMaxWidth: s.barMaxWidth ?? candlestickDefaults.barMaxWidth,
+          sampling: resolvedSampling,
+          samplingThreshold: resolvedSamplingThreshold,
+          rawBounds,
+        };
       }
       default: {
         return assertUnreachable(s);

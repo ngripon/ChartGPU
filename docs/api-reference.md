@@ -77,12 +77,13 @@ See [`examples/data-update-animation/`](../examples/data-update-animation/).
 Appends points to a **cartesian** series at runtime (streaming) and schedules a render (coalesced).
 
 ```ts
-appendData(seriesIndex: number, newPoints: DataPoint[]): void
+appendData(seriesIndex: number, newPoints: DataPoint[] | OHLCDataPoint[]): void
 ```
 
 Notes:
 
 - Pie series (`type: 'pie'`) are not supported by streaming append. Use `setOption(...)` to replace pie data.
+- For candlestick series (`type: 'candlestick'`), pass `OHLCDataPoint[]`. For other cartesian series (line/area/bar/scatter), pass `DataPoint[]`.
 - When `ChartGPUOptions.autoScroll === true`, appends may also adjust the x-axis percent zoom window (only when zoom is enabled and `xAxis.min/max` are not set).
 
 Example (streaming):
@@ -92,6 +93,20 @@ chart.appendData(0, [[3, 5], [4, 8]]);
 ```
 
 See [`examples/live-streaming/`](../examples/live-streaming/).
+
+## Streaming Candlestick Data
+
+For real-time candlestick updates, use `appendData()` to add new candles at the candle boundary (e.g. when a candle closes / the next candle opens), and `setOption()` for updating the current (forming) candle.
+
+**Best practices:**
+
+- Disable animation: `animation: false`
+- Enable auto-scroll: `autoScroll: true`
+- Throttle current-candle updates to ~100ms
+- Use memory bounding with periodic trim
+- Use OHLC sampling for large datasets (`sampling: 'ohlc'` + `samplingThreshold`)
+
+See [`examples/candlestick-streaming/`](../examples/candlestick-streaming/) for a complete runnable demo.
 
 #### `resize()`
 
@@ -382,6 +397,9 @@ export interface AxisConfig {
 }
 ```
 
+- **`type: 'time'` expects ms timestamps**: when `xAxis.type === 'time'`, x-values are interpreted as **milliseconds since Unix epoch**.
+- **Time-axis label tiers + adaptive tick count**: time x-axis labels use tiered formatting based on the visible range, and the tick count may vary to avoid overlap; GPU tick marks and labels stay matched. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts).
+
 ### `ThemeConfig`
 
 Type definition: [`src/themes/types.ts`](../src/themes/types.ts). Built-in presets: [`darkTheme`](../src/themes/darkTheme.ts), [`lightTheme`](../src/themes/lightTheme.ts).
@@ -410,6 +428,14 @@ export interface TooltipConfig {
     | ((params: ReadonlyArray<TooltipParams>) => string);
 }
 ```
+
+**Tooltip value tuples:**
+
+- Cartesian series (line, area, bar, scatter): `params.value` is `readonly [number, number]` for `[x, y]`.
+- Candlestick series: `params.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`. Candlestick tooltips anchor to the candle body center (vertical midpoint between open and close) rather than cursor position, providing stable positioning in both item and axis trigger modes.
+- Pie series: `params.value` is `readonly [number, number]` for `[0, sliceValue]`.
+
+Custom formatters can distinguish by checking `params.value.length` (2 for cartesian/pie, 5 for candlestick). See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for default implementations and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) for positioning logic.
 
 Security note: tooltip content is assigned via `innerHTML`. Only return trusted/sanitized strings.
 

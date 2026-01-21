@@ -56,6 +56,23 @@ function sanitizeCssColor(value: string): string {
   return '#888';
 }
 
+function isCandlestickValue(
+  value: readonly [number, number] | readonly [number, number, number, number, number],
+): value is readonly [number, number, number, number, number] {
+  return value.length === 5;
+}
+
+function formatPercentChange(open: number, close: number): string {
+  if (!Number.isFinite(open) || !Number.isFinite(close)) return EM_DASH;
+  if (open === 0) return EM_DASH; // Avoid division by zero
+
+  const change = ((close - open) / open) * 100;
+  if (!Number.isFinite(change)) return EM_DASH;
+
+  const sign = change > 0 ? '+' : '';
+  return `${sign}${change.toFixed(2)}%`;
+}
+
 function formatRowHtml(params: TooltipParams, valueText: string): string {
   const safeName = escapeHtml(resolveSeriesName(params));
   const safeValue = escapeHtml(valueText);
@@ -72,17 +89,72 @@ function formatRowHtml(params: TooltipParams, valueText: string): string {
   ].join('');
 }
 
+function formatCandlestickRowHtml(params: TooltipParams): string {
+  const [, open, close, low, high] = params.value as readonly [number, number, number, number, number];
+  
+  const safeName = escapeHtml(resolveSeriesName(params));
+  const safeColor = escapeHtml(sanitizeCssColor(params.color));
+
+  // Format OHLC values
+  const openStr = formatNumber(open);
+  const highStr = formatNumber(high);
+  const lowStr = formatNumber(low);
+  const closeStr = formatNumber(close);
+  
+  // Determine direction and arrow
+  const isUp = close > open;
+  const arrow = isUp ? '\u25B2' : '\u25BC'; // ▲ or ▼
+  const arrowColor = isUp ? '#22c55e' : '#ef4444';
+  const percentChange = formatPercentChange(open, close);
+
+  const ohlcText = `O: ${openStr} H: ${highStr} L: ${lowStr} C: ${closeStr}`;
+  const safeOHLC = escapeHtml(ohlcText);
+  const safeArrow = escapeHtml(arrow);
+  const safePercent = escapeHtml(percentChange);
+  const safeArrowColor = escapeHtml(arrowColor);
+
+  return [
+    '<div style="display:flex;flex-direction:column;gap:4px;">',
+    // Series name row
+    '<div style="display:flex;align-items:center;gap:8px;">',
+    `<span style="width:8px;height:8px;border-radius:999px;flex:0 0 auto;background-color:${safeColor};"></span>`,
+    `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;">${safeName}</span>`,
+    '</div>',
+    // OHLC values row
+    `<div style="font-variant-numeric:tabular-nums;white-space:nowrap;font-size:0.9em;">${safeOHLC}</div>`,
+    // Change row with arrow
+    '<div style="display:flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums;">',
+    `<span style="color:${safeArrowColor};font-weight:700;">${safeArrow}</span>`,
+    `<span style="color:${safeArrowColor};font-weight:600;">${safePercent}</span>`,
+    '</div>',
+    '</div>',
+  ].join('');
+}
+
+/**
+ * Default tooltip formatter for candlestick series in item mode.
+ * Renders O/H/L/C values with colored arrow and percentage change.
+ */
+export function formatCandlestickTooltip(params: TooltipParams): string {
+  return formatCandlestickRowHtml(params);
+}
+
 /**
  * Default tooltip formatter for item mode.
  * Returns a compact single-row HTML snippet: dot + series name + y value.
+ * For candlestick series, returns O/H/L/C with arrow and percentage change.
  */
 export function formatTooltipItem(params: TooltipParams): string {
+  if (isCandlestickValue(params.value)) {
+    return formatCandlestickTooltip(params);
+  }
   return formatRowHtml(params, formatNumber(params.value[1]));
 }
 
 /**
  * Default tooltip formatter for axis mode.
  * Renders an x header line then one row per series with the y value.
+ * Candlestick series show O/H/L/C values with arrow and percentage change.
  */
 export function formatTooltipAxis(params: TooltipParams[]): string {
   if (params.length === 0) return '';
@@ -93,7 +165,12 @@ export function formatTooltipAxis(params: TooltipParams[]): string {
   )}</div>`;
 
   const rows = params
-    .map((p) => formatRowHtml(p, formatNumber(p.value[1])))
+    .map((p) => {
+      if (isCandlestickValue(p.value)) {
+        return formatCandlestickRowHtml(p);
+      }
+      return formatRowHtml(p, formatNumber(p.value[1]));
+    })
     .join('<div style="height:4px;"></div>');
 
   return `${header}${rows}`;

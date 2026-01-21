@@ -22,7 +22,7 @@ See [ChartGPU.ts](../src/ChartGPU.ts) for the full interface and lifecycle behav
 **Methods (essential):**
 
 - `setOption(options: ChartGPUOptions): void`: replaces the current user options, resolves them against defaults via [`resolveOptions`](../src/config/OptionResolver.ts), updates internal render state, and schedules a single on-demand render on the next `requestAnimationFrame` tick (coalesces multiple calls).
-- `appendData(seriesIndex: number, newPoints: DataPoint[]): void`: appends new points to a **cartesian** series at runtime (streaming), updates internal runtime bounds, and schedules a render (coalesces). Internally, streaming appends are flushed via a unified scheduler (rAF-first with a small timeout fallback) and only do resampling work when zoom is active or a zoom change debounce matures. When `ChartGPUOptions.autoScroll === true`, this may also adjust the x-axis percent zoom window (see **Auto-scroll (streaming)** below). Pie series are not supported by streaming append. See [`ChartGPU.ts`](../src/ChartGPU.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts). For an end-to-end example, see [`examples/live-streaming/`](../examples/live-streaming/).
+- `appendData(seriesIndex: number, newPoints: DataPoint[] | OHLCDataPoint[]): void`: appends new points to a **cartesian** series at runtime (streaming), updates internal runtime bounds, and schedules a render (coalesces). For candlestick series, pass `OHLCDataPoint[]`. For other cartesian series (line/area/bar/scatter), pass `DataPoint[]`. Internally, streaming appends are flushed via a unified scheduler (rAF-first with a small timeout fallback) and only do resampling work when zoom is active or a zoom change debounce matures. When `ChartGPUOptions.autoScroll === true`, this may also adjust the x-axis percent zoom window (see **Auto-scroll (streaming)** below). Pie series are not supported by streaming append. See [`ChartGPU.ts`](../src/ChartGPU.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts). For an end-to-end example, see [`examples/live-streaming/`](../examples/live-streaming/) and [`examples/candlestick-streaming/`](../examples/candlestick-streaming/).
 - `resize(): void`: recomputes the canvas backing size / WebGPU canvas configuration from the container size; if anything changes, schedules a render.
 - `dispose(): void`: cancels any pending frame, disposes internal render resources, destroys the WebGPU context, and removes the canvas.
 - `on(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void`: registers an event listener. See [Event handling](#event-handling) below.
@@ -116,9 +116,19 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 
 **Series configuration (essential):**
 
-- **`SeriesType`**: `'line' | 'area' | 'bar' | 'scatter' | 'pie'`. See [`types.ts`](../src/config/types.ts).
-- **`SeriesConfig`**: `LineSeriesConfig | AreaSeriesConfig | BarSeriesConfig | ScatterSeriesConfig | PieSeriesConfig` (discriminated by `series.type`). See [`types.ts`](../src/config/types.ts).
+- **`SeriesType`**: `'line' | 'area' | 'bar' | 'scatter' | 'pie' | 'candlestick'`. See [`types.ts`](../src/config/types.ts).
+- **`SeriesConfig`**: `LineSeriesConfig | AreaSeriesConfig | BarSeriesConfig | ScatterSeriesConfig | PieSeriesConfig | CandlestickSeriesConfig` (discriminated by `series.type`). See [`types.ts`](../src/config/types.ts).
 - **Sampling (cartesian series only)**: cartesian series support optional `sampling?: 'none' | 'lttb' | 'average' | 'max' | 'min'` and optional `samplingThreshold?: number` (applied when the input series data length exceeds the threshold). When omitted, defaults are `sampling: 'lttb'` and `samplingThreshold: 5000` via [`resolveOptions`](../src/config/OptionResolver.ts) and baseline defaults in [`defaults.ts`](../src/config/defaults.ts). Sampling affects rendering and cartesian hit-testing only; axis auto-bounds are derived from raw (unsampled) series data unless you set `xAxis.min`/`xAxis.max` or `yAxis.min`/`yAxis.max` (see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts)). When x-axis data zoom is enabled, sampling is re-applied against the **visible x-range** (from the percent-space zoom window in \([0, 100]\)) using raw data; resampling is **debounced (~100ms)** during zoom changes (see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts)). Pie series (`type: 'pie'`) do not support these fields (pie is non-cartesian).
+- **`CandlestickSeriesConfig`**: extends shared series fields with `type: 'candlestick'` and OHLC-specific configuration. See [`types.ts`](../src/config/types.ts).
+  - **Data format**: uses `OHLCDataPoint` (either tuple `[timestamp, open, close, low, high]` or object `{ timestamp, open, close, low, high }`). See [`types.ts`](../src/config/types.ts).
+  - **Rendering**: candlestick series are now rendered with bodies (rectangles) and wicks (thin lines) via the internal renderer [`createCandlestickRenderer.ts`](../src/renderers/createCandlestickRenderer.ts) using shader [`candlestick.wgsl`](../src/shaders/candlestick.wgsl). The render coordinator orchestrates candlestick rendering in the series drawing pass; see [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+  - **Candlestick styles**: candlesticks support two rendering styles via `CandlestickSeriesConfig.style`: `'classic'` (default, filled bodies for all candles) and `'hollow'` (hollow body when close > open, filled when close < open). See [`types.ts`](../src/config/types.ts).
+  - **OHLC sampling**: candlestick series support `sampling?: 'none' | 'ohlc'`. When `sampling === 'ohlc'`, ChartGPU applies bucket aggregation that preserves OHLC semantics: first and last candles are preserved exactly; middle candles aggregate into buckets where each bucket uses `timestamp` and `open` from the first candle in the bucket, `close` from the last candle in the bucket, `high` as the max of all highs in the bucket, and `low` as the min of all lows in the bucket. Endpoints are always preserved. See [`ohlcSample.ts`](../src/data/ohlcSample.ts).
+  - **Zoom-aware OHLC resampling**: when x-axis data zoom is enabled and `sampling === 'ohlc'`, ChartGPU resamples based on the visible timestamp range with a policy of `targetPoints = min(visibleDataLength * 32, 200000)` (32× multiplier with 200K cap). This resampling is debounced (~100ms) during zoom changes and uses raw (unsampled) data as the source. Axis bounds and zoom mapping always use raw (unsampled) bounds regardless of sampling mode. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+  - **Interaction limitations (important)**: candlesticks support **body-only** hit-testing for tooltip/hover/click interactions (wicks are not hoverable). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and [`findCandlestick.ts`](../src/interaction/findCandlestick.ts).
+  - **Example**: for a working candlestick chart with style toggle, see [`examples/candlestick/`](../examples/candlestick/).
+  - **Streaming example**: for a live tick simulator aggregating into candles (append new candles at the candle boundary, throttle forming-candle updates), see [`examples/candlestick-streaming/`](../examples/candlestick-streaming/).
+  - **Acceptance test**: for OHLC sampling validation (endpoint preservation, aggregation rules, edge cases), see [`examples/acceptance/ohlc-sample.ts`](../examples/acceptance/ohlc-sample.ts).
 - **`LineSeriesConfig`**: extends the shared series fields with `type: 'line'`, optional `lineStyle?: LineStyleConfig`, and optional `areaStyle?: AreaStyleConfig`.
   - When a line series includes `areaStyle`, ChartGPU renders a filled area behind the line (area fills then line strokes). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 - **`AreaSeriesConfig`**: extends the shared series fields with `type: 'area'`, optional `baseline?: number`, and optional `areaStyle?: AreaStyleConfig`.
@@ -151,6 +161,19 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 **Axis configuration (essential):**
 
 - **`AxisConfig`**: configuration for `xAxis` / `yAxis`. See [`types.ts`](../src/config/types.ts).
+- **`xAxis.type: 'time'` (timestamps)**: when `xAxis.type === 'time'`, x-values are interpreted as **timestamps in milliseconds since Unix epoch** (the same unit accepted by `new Date(ms)`), including candlestick `timestamp` values. See the runtime axis label/tick logic in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- **Time x-axis tick labels (automatic tiers)**: when `xAxis.type === 'time'`, x-axis tick labels are formatted based on the **current visible x-range** (after data zoom):
+
+  | Visible x-range (approx.) | Label format |
+  |---|---|
+  | `< 1 day` | `HH:mm` |
+  | `1–7 days` | `MM/DD HH:mm` |
+  | `~1–12 weeks` *(or `< ~3 months`)* | `MM/DD` |
+  | `~3–12 months` *(≤ ~1 year)* | `MMM DD` |
+  | `> ~1 year` | `YYYY/MM` |
+
+  Notes: month/year thresholds are **approximate** (30d / 365d), and formatting uses the browser’s `Date` semantics (local timezone). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- **Adaptive tick count (overlap avoidance, time x-axis only)**: when `xAxis.type === 'time'`, ChartGPU may **vary the tick count per render** to avoid DOM label overlap. It picks the largest tick count in **\[1, 9]** whose measured labels do not overlap (minimum gap **6 CSS px**); if measurement isn’t available it falls back to the default tick count. **GPU tick marks and DOM tick labels use the same computed tick count.** See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts) and [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts).
 - **`AxisConfig.name?: string`**: renders an axis title for cartesian charts when provided (and non-empty after `trim()`): x-axis titles are centered below x-axis tick labels, and y-axis titles are rotated \(-90°\) and placed left of y-axis tick labels; titles can be clipped if `grid.bottom` / `grid.left` margins are too small. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 - **Axis title styling**: titles are rendered via the internal DOM text overlay and use the resolved theme’s `textColor` and `fontFamily` with slightly larger, bold text (label elements also set `dir='auto'`).
 
@@ -181,7 +204,8 @@ See [`types.ts`](../src/config/types.ts) for the full type definition.
 - **Enablement**: when `tooltip.show !== false`, ChartGPU creates an internal DOM tooltip overlay and updates it on hover; when `tooltip.show === false`, the tooltip is not shown.
 - **Hover behavior**: tooltip updates on pointer movement within the plot grid and hides on pointer leave. For cartesian series it uses cartesian hit-testing (see [`findNearestPoint.ts`](../src/interaction/findNearestPoint.ts) and [`findPointsAtX.ts`](../src/interaction/findPointsAtX.ts)); for pie series it uses pie slice hit-testing (see [`findPieSlice.ts`](../src/interaction/findPieSlice.ts)). See the tooltip logic in [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 - **`TooltipConfig.trigger?: 'item' | 'axis'`**: tooltip trigger mode.
-- **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`).
+- **`TooltipConfig.formatter?: (params: TooltipParams | TooltipParams[]) => string`**: custom formatter function. Receives a single `TooltipParams` when `trigger` is `'item'`, or an array of `TooltipParams` when `trigger` is `'axis'`. See [`types.ts`](../src/config/types.ts) for `TooltipParams` fields (`seriesName`, `seriesIndex`, `dataIndex`, `value`, `color`). The `value` field is a readonly tuple: `[x, y]` for cartesian series (line, area, bar, scatter), or `[timestamp, open, close, low, high]` for candlestick series. Custom formatters can distinguish by checking `params.value.length` (2 vs 5). See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for the default formatter implementations.
+- **Candlestick tooltip positioning**: when a candlestick series is hovered or included in axis-trigger mode, the tooltip anchors to the candle body center (vertical midpoint between open and close values) rather than the cursor position, providing stable positioning. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 
 **Animation (type definitions):**
 
@@ -222,11 +246,24 @@ For a minimal acceptance check (0→100 over 300ms with easing), see [`examples/
 
 **`TooltipParams` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`types.ts`](../src/config/types.ts).
 
+Tooltip value tuples:
+
+- **Cartesian series** (line, area, bar, scatter): `params.value` is `readonly [number, number]` for `[x, y]`.
+- **Candlestick series**: `params.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`. Candlestick tooltips anchor to the candle body center rather than cursor position.
+- **Pie series**: `params.value` is `readonly [number, number]` for `[0, sliceValue]` (non-cartesian; x-slot is `0`).
+
+Custom formatters can distinguish series types by checking `params.value.length` or by using a type guard. See [`formatTooltip.ts`](../src/components/formatTooltip.ts) for examples.
+
+**`OHLCDataPoint` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`types.ts`](../src/config/types.ts). Represents a candlestick data point as either a tuple (`readonly [timestamp, open, close, low, high]`, ECharts order) or an object (`Readonly<{ timestamp, open, close, low, high }>`). Used by `CandlestickSeriesConfig`. Both candlestick rendering and OHLC sampling are fully functional (see **CandlestickSeriesConfig** above).
+
+**`candlestickDefaults` (public export):** exported from the public entrypoint [`src/index.ts`](../src/index.ts) and defined in [`defaults.ts`](../src/config/defaults.ts). Provides default configuration values for candlestick series. Both candlestick rendering and OHLC sampling are fully functional (see **CandlestickSeriesConfig** above).
+
 Default tooltip formatter helpers are available in [`formatTooltip.ts`](../src/components/formatTooltip.ts): `formatTooltipItem(params: TooltipParams): string` (item mode) and `formatTooltipAxis(params: TooltipParams[]): string` (axis mode). Both return HTML strings intended for the internal tooltip overlay’s `innerHTML` usage; the axis formatter includes an x header line.
 
 Notes:
 
-- For pie slice tooltips, `TooltipParams.seriesName` uses the slice `name` (not the series `name`), and `TooltipParams.value` is `[0, sliceValue]`. See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- For pie slice tooltips, `TooltipParams.seriesName` uses the slice `name` (not the series `name`), and `TooltipParams.value` is `readonly [number, number]` for `[0, sliceValue]` (pie is non-cartesian; the x-slot is `0`). See [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+- For candlestick tooltips, `TooltipParams.value` is `readonly [number, number, number, number, number]` for `[timestamp, open, close, low, high]`. In both item and axis trigger modes, the tooltip anchors to the candle body center (vertical midpoint between open and close) rather than the cursor position for stable positioning. See [`formatTooltip.ts`](../src/components/formatTooltip.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
 
 **Content safety (important)**: the tooltip overlay assigns `content` via `innerHTML`. Only return trusted/sanitized strings from `TooltipConfig.formatter`. See the internal tooltip overlay helper in [`createTooltip.ts`](../src/components/createTooltip.ts) and the default formatter helpers in [`formatTooltip.ts`](../src/components/formatTooltip.ts).
 
@@ -703,10 +740,10 @@ A minimal axis (baseline + ticks) renderer factory lives in [`createAxisRenderer
 
 - **`createAxisRenderer(device: GPUDevice, options?: AxisRendererOptions): AxisRenderer`**
 - **`AxisRendererOptions.targetFormat?: GPUTextureFormat`**: must match the render pass color attachment format (typically `GPUContextState.preferredFormat`). Defaults to `'bgra8unorm'` for backward compatibility.
-- **`AxisRenderer.prepare(axisConfig: AxisConfig, scale: LinearScale, orientation: 'x' | 'y', gridArea: GridArea, axisLineColor?: string, axisTickColor?: string): void`**
+- **`AxisRenderer.prepare(axisConfig: AxisConfig, scale: LinearScale, orientation: 'x' | 'y', gridArea: GridArea, axisLineColor?: string, axisTickColor?: string, tickCount?: number): void`**
   - **`orientation`**: `'x'` renders the baseline along the bottom edge of the plot area (ticks extend outward/down); `'y'` renders along the left edge (ticks extend outward/left).
   - **Ticks**: placed at regular intervals across the axis domain.
-  - **Tick labels**: numeric tick value labels are rendered for each tick mark (label count matches tick count). The current tick count is fixed at 5; see [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
+  - **Tick labels**: tick value labels are rendered for each tick mark (label count matches tick count). Default tick count is `5`; when `xAxis.type === 'time'`, the render coordinator may compute an **adaptive** x tick count to avoid label overlap and passes it to the axis renderer so GPU ticks and DOM labels stay in sync. See [`createAxisRenderer.ts`](../src/renderers/createAxisRenderer.ts) and [`createRenderCoordinator.ts`](../src/core/createRenderCoordinator.ts).
   - **Tick length**: `AxisConfig.tickLength` is in CSS pixels (default: 6).
   - **Baseline vs ticks**: the baseline and tick segments can be styled with separate colors (`axisLineColor` vs `axisTickColor`).
 

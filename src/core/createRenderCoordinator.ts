@@ -1,12 +1,14 @@
 import type {
   ResolvedAreaSeriesConfig,
   ResolvedBarSeriesConfig,
+  ResolvedCandlestickSeriesConfig,
   ResolvedChartGPUOptions,
   ResolvedPieSeriesConfig,
 } from '../config/OptionResolver';
-import type { AnimationConfig, DataPoint, DataPointTuple, PieCenter, PieRadius } from '../config/types';
+import type { AnimationConfig, DataPoint, DataPointTuple, OHLCDataPoint, OHLCDataPointTuple, PieCenter, PieRadius } from '../config/types';
 import { createDataStore } from '../data/createDataStore';
 import { sampleSeriesDataPoints } from '../data/sampleSeries';
+import { ohlcSample } from '../data/ohlcSample';
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
@@ -15,6 +17,7 @@ import { createLineRenderer } from '../renderers/createLineRenderer';
 import { createBarRenderer } from '../renderers/createBarRenderer';
 import { createScatterRenderer } from '../renderers/createScatterRenderer';
 import { createPieRenderer } from '../renderers/createPieRenderer';
+import { createCandlestickRenderer } from '../renderers/createCandlestickRenderer';
 import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
 import type { CrosshairRenderOptions } from '../renderers/createCrosshairRenderer';
 import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
@@ -26,6 +29,7 @@ import { createZoomState } from '../interaction/createZoomState';
 import type { ZoomRange, ZoomState } from '../interaction/createZoomState';
 import { findNearestPoint } from '../interaction/findNearestPoint';
 import { findPointsAtX } from '../interaction/findPointsAtX';
+import { computeCandlestickBodyWidthRange, findCandlestick } from '../interaction/findCandlestick';
 import { findPieSlice } from '../interaction/findPieSlice';
 import { createLinearScale } from '../utils/scales';
 import type { LinearScale } from '../utils/scales';
@@ -59,7 +63,7 @@ export interface RenderCoordinator {
    *
    * Appends are coalesced and flushed once per render frame.
    */
-  appendData(seriesIndex: number, newPoints: ReadonlyArray<DataPoint>): void;
+  appendData(seriesIndex: number, newPoints: ReadonlyArray<DataPoint> | ReadonlyArray<OHLCDataPoint>): void;
   /**
    * Gets the current “interaction x” in domain units (or `null` when inactive).
    *
@@ -115,6 +119,22 @@ const DEFAULT_TICK_LENGTH_CSS_PX: number = 6;
 const LABEL_PADDING_CSS_PX = 4;
 const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
 const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
+
+// Story 6: time-axis label tiers + adaptive tick count (x-axis only).
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+// Approximate month/year thresholds (requirements are ms-range based, not calendar-aware).
+const MS_PER_MONTH_APPROX = 30 * MS_PER_DAY;
+const MS_PER_YEAR_APPROX = 365 * MS_PER_DAY;
+
+const MAX_TIME_X_TICK_COUNT = 9;
+const MIN_TIME_X_TICK_COUNT = 1;
+const MIN_X_LABEL_GAP_CSS_PX = 6;
+
+const finiteOrNull = (v: number | null | undefined): number | null =>
+  typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+const finiteOrUndefined = (v: number | undefined): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 
 // Story 5.17: CPU-side update interpolation can be expensive for very large series.
 // We still animate domains for large series, but skip per-point y interpolation past this cap.
@@ -190,6 +210,38 @@ const extendBoundsWithDataPoints = (bounds: Bounds | null, points: ReadonlyArray
   return { xMin, xMax, yMin, yMax };
 };
 
+const extendBoundsWithOHLCDataPoints = (bounds: Bounds | null, points: ReadonlyArray<OHLCDataPoint>): Bounds | null => {
+  if (points.length === 0) return bounds;
+
+  let xMin = bounds?.xMin ?? Number.POSITIVE_INFINITY;
+  let xMax = bounds?.xMax ?? Number.NEGATIVE_INFINITY;
+  let yMin = bounds?.yMin ?? Number.POSITIVE_INFINITY;
+  let yMax = bounds?.yMax ?? Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    const timestamp = isTupleOHLCDataPoint(p) ? p[0] : p.timestamp;
+    const low = isTupleOHLCDataPoint(p) ? p[3] : p.low;
+    const high = isTupleOHLCDataPoint(p) ? p[4] : p.high;
+
+    if (!Number.isFinite(timestamp) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+    if (timestamp < xMin) xMin = timestamp;
+    if (timestamp > xMax) xMax = timestamp;
+    if (low < yMin) yMin = low;
+    if (high > yMax) yMax = high;
+  }
+
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return bounds;
+  }
+
+  // Keep bounds usable for downstream scale derivation.
+  if (xMin === xMax) xMax = xMin + 1;
+  if (yMin === yMax) yMax = yMin + 1;
+
+  return { xMin, xMax, yMin, yMax };
+};
+
 const computeGlobalBounds = (
   series: ResolvedChartGPUOptions['series'],
   runtimeRawBoundsByIndex?: ReadonlyArray<Bounds | null> | null
@@ -238,6 +290,43 @@ const computeGlobalBounds = (
         if (b.yMax > yMax) yMax = b.yMax;
         continue;
       }
+    }
+
+    // Candlestick series: bounds should be precomputed in OptionResolver from timestamp/low/high.
+    // If we reach here, `rawBounds` was undefined; fall back to a raw OHLC scan so axes don't break.
+    if (seriesConfig.type === 'candlestick') {
+      const rawOHLC = (seriesConfig.rawData ?? seriesConfig.data) as ReadonlyArray<OHLCDataPoint>;
+      for (let i = 0; i < rawOHLC.length; i++) {
+        const p = rawOHLC[i]!;
+        if (isTupleOHLCDataPoint(p)) {
+          const timestamp = p[0];
+          const low = p[3];
+          const high = p[4];
+          if (!Number.isFinite(timestamp) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+
+          const yLow = Math.min(low, high);
+          const yHigh = Math.max(low, high);
+
+          if (timestamp < xMin) xMin = timestamp;
+          if (timestamp > xMax) xMax = timestamp;
+          if (yLow < yMin) yMin = yLow;
+          if (yHigh > yMax) yMax = yHigh;
+        } else {
+          const timestamp = p.timestamp;
+          const low = p.low;
+          const high = p.high;
+          if (!Number.isFinite(timestamp) || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+
+          const yLow = Math.min(low, high);
+          const yHigh = Math.max(low, high);
+
+          if (timestamp < xMin) xMin = timestamp;
+          if (timestamp > xMax) xMax = timestamp;
+          if (yLow < yMin) yMin = yLow;
+          if (yHigh > yMax) yMax = yHigh;
+        }
+      }
+      continue;
     }
 
     const data = seriesConfig.data;
@@ -381,27 +470,47 @@ const isTuplePoint = (p: DataPoint): p is TuplePoint => Array.isArray(p);
 const isTupleDataArray = (data: ReadonlyArray<DataPoint>): data is ReadonlyArray<TuplePoint> =>
   data.length > 0 && isTuplePoint(data[0]!);
 
+// Cache monotonicity checks to avoid O(n) scans on every zoom operation.
+const monotonicXCache = new WeakMap<ReadonlyArray<DataPoint>, boolean>();
+
 const isMonotonicNonDecreasingFiniteX = (data: ReadonlyArray<DataPoint>, isTuple: boolean): boolean => {
+  const cached = monotonicXCache.get(data);
+  if (cached !== undefined) return cached;
+
   let prevX = Number.NEGATIVE_INFINITY;
 
   if (isTuple) {
     const tupleData = data as ReadonlyArray<TuplePoint>;
     for (let i = 0; i < tupleData.length; i++) {
       const x = tupleData[i][0];
-      if (!Number.isFinite(x)) return false;
-      if (x < prevX) return false;
+      if (!Number.isFinite(x)) {
+        monotonicXCache.set(data, false);
+        return false;
+      }
+      if (x < prevX) {
+        monotonicXCache.set(data, false);
+        return false;
+      }
       prevX = x;
     }
+    monotonicXCache.set(data, true);
     return true;
   }
 
   const objectData = data as ReadonlyArray<ObjectPoint>;
   for (let i = 0; i < objectData.length; i++) {
     const x = objectData[i].x;
-    if (!Number.isFinite(x)) return false;
-    if (x < prevX) return false;
+    if (!Number.isFinite(x)) {
+      monotonicXCache.set(data, false);
+      return false;
+    }
+    if (x < prevX) {
+      monotonicXCache.set(data, false);
+      return false;
+    }
     prevX = x;
   }
+  monotonicXCache.set(data, true);
   return true;
 };
 
@@ -481,6 +590,127 @@ const sliceVisibleRangeByX = (data: ReadonlyArray<DataPoint>, xMin: number, xMax
     const { x } = getPointXY(p);
     if (!Number.isFinite(x)) continue;
     if (x >= xMin && x <= xMax) out.push(p);
+  }
+  return out;
+};
+
+function isTupleOHLCDataPoint(p: OHLCDataPoint): p is OHLCDataPointTuple {
+  return Array.isArray(p);
+}
+
+// Cache monotonicity checks to avoid O(n) scans on every zoom operation.
+const monotonicTimestampCache = new WeakMap<ReadonlyArray<OHLCDataPoint>, boolean>();
+
+const isMonotonicNonDecreasingFiniteTimestamp = (data: ReadonlyArray<OHLCDataPoint>): boolean => {
+  const cached = monotonicTimestampCache.get(data);
+  if (cached !== undefined) return cached;
+
+  let prevTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < data.length; i++) {
+    const p = data[i]!;
+    const timestamp = isTupleOHLCDataPoint(p) ? p[0] : p.timestamp;
+    if (!Number.isFinite(timestamp)) {
+      monotonicTimestampCache.set(data, false);
+      return false;
+    }
+    if (timestamp < prevTimestamp) {
+      monotonicTimestampCache.set(data, false);
+      return false;
+    }
+    prevTimestamp = timestamp;
+  }
+  monotonicTimestampCache.set(data, true);
+  return true;
+};
+
+const lowerBoundTimestampTuple = (data: ReadonlyArray<OHLCDataPointTuple>, timestampTarget: number): number => {
+  let lo = 0;
+  let hi = data.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const timestamp = data[mid][0];
+    if (timestamp < timestampTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+const upperBoundTimestampTuple = (data: ReadonlyArray<OHLCDataPointTuple>, timestampTarget: number): number => {
+  let lo = 0;
+  let hi = data.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const timestamp = data[mid][0];
+    if (timestamp <= timestampTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+type OHLCObjectPoint = Readonly<{ timestamp: number; open: number; close: number; low: number; high: number }>;
+
+const lowerBoundTimestampObject = (data: ReadonlyArray<OHLCObjectPoint>, timestampTarget: number): number => {
+  let lo = 0;
+  let hi = data.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const timestamp = data[mid].timestamp;
+    if (timestamp < timestampTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+const upperBoundTimestampObject = (data: ReadonlyArray<OHLCObjectPoint>, timestampTarget: number): number => {
+  let lo = 0;
+  let hi = data.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const timestamp = data[mid].timestamp;
+    if (timestamp <= timestampTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+/**
+ * Slices OHLC/candlestick data to the visible timestamp range [xMin, xMax].
+ *
+ * Uses binary search when timestamps are sorted ascending; otherwise falls back to linear scan.
+ */
+const sliceVisibleRangeByOHLC = (
+  data: ReadonlyArray<OHLCDataPoint>,
+  xMin: number,
+  xMax: number
+): ReadonlyArray<OHLCDataPoint> => {
+  const n = data.length;
+  if (n === 0) return data;
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return data;
+
+  const canBinarySearch = isMonotonicNonDecreasingFiniteTimestamp(data);
+  const isTuple = n > 0 && isTupleOHLCDataPoint(data[0]!);
+
+  if (canBinarySearch) {
+    const lo = isTuple
+      ? lowerBoundTimestampTuple(data as ReadonlyArray<OHLCDataPointTuple>, xMin)
+      : lowerBoundTimestampObject(data as ReadonlyArray<OHLCObjectPoint>, xMin);
+    const hi = isTuple
+      ? upperBoundTimestampTuple(data as ReadonlyArray<OHLCDataPointTuple>, xMax)
+      : upperBoundTimestampObject(data as ReadonlyArray<OHLCObjectPoint>, xMax);
+
+    if (lo <= 0 && hi >= n) return data;
+    if (hi <= lo) return [];
+    return data.slice(lo, hi);
+  }
+
+  // Safe fallback: linear filter (preserves order, ignores non-finite timestamp).
+  const out: OHLCDataPoint[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = data[i]!;
+    const timestamp = isTupleOHLCDataPoint(p) ? p[0] : p.timestamp;
+    if (!Number.isFinite(timestamp)) continue;
+    if (timestamp >= xMin && timestamp <= xMax) out.push(p);
   }
   return out;
 };
@@ -579,13 +809,165 @@ const formatTickValue = (nf: Intl.NumberFormat, v: number): string | null => {
   return formatted === 'NaN' ? null : formatted;
 };
 
+const pad2 = (n: number): string => String(Math.trunc(n)).padStart(2, '0');
+
+const MONTH_SHORT_EN: readonly string[] = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+const formatTimeTickValue = (timestampMs: number, visibleRangeMs: number): string | null => {
+  if (!Number.isFinite(timestampMs)) return null;
+  if (!Number.isFinite(visibleRangeMs) || visibleRangeMs < 0) visibleRangeMs = 0;
+
+  const d = new Date(timestampMs);
+  // Guard against out-of-range timestamps that produce an invalid Date.
+  if (!Number.isFinite(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = d.getMonth() + 1; // 1-12
+  const dd = d.getDate();
+  const hh = d.getHours();
+  const min = d.getMinutes();
+
+  // Requirements (range in ms):
+  // - < 1 day: HH:mm
+  // - 1-7 days: MM/DD HH:mm
+  // - 1-12 weeks (and up to ~3 months): MM/DD
+  // - 3-12 months: MMM DD
+  // - > 1 year: YYYY/MM
+  if (visibleRangeMs < MS_PER_DAY) {
+    return `${pad2(hh)}:${pad2(min)}`;
+  }
+  // Treat the 7-day boundary as inclusive for the “1–7 days” tier.
+  if (visibleRangeMs <= 7 * MS_PER_DAY) {
+    return `${pad2(mm)}/${pad2(dd)} ${pad2(hh)}:${pad2(min)}`;
+  }
+  // Keep short calendar dates until the visible range reaches ~3 months.
+  // (This covers the 1–12 week requirement, plus the small 12w→3m gap.)
+  if (visibleRangeMs < 3 * MS_PER_MONTH_APPROX) {
+    return `${pad2(mm)}/${pad2(dd)}`;
+  }
+  if (visibleRangeMs <= MS_PER_YEAR_APPROX) {
+    const mmm = MONTH_SHORT_EN[d.getMonth()] ?? pad2(mm);
+    return `${mmm} ${pad2(dd)}`;
+  }
+  return `${yyyy}/${pad2(mm)}`;
+};
+
+const generateLinearTicks = (domainMin: number, domainMax: number, tickCount: number): number[] => {
+  const count = Math.max(1, Math.floor(tickCount));
+  const ticks: number[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    ticks[i] = domainMin + t * (domainMax - domainMin);
+  }
+  return ticks;
+};
+
+const computeAdaptiveTimeXAxisTicks = (params: {
+  readonly axisMin: number | null;
+  readonly axisMax: number | null;
+  readonly xScale: LinearScale;
+  readonly plotClipLeft: number;
+  readonly plotClipRight: number;
+  readonly canvasCssWidth: number;
+  readonly visibleRangeMs: number;
+  readonly measureCtx: CanvasRenderingContext2D | null;
+  readonly measureCache?: Map<string, number>;
+  readonly fontSize: number;
+  readonly fontFamily: string;
+}): { readonly tickCount: number; readonly tickValues: readonly number[] } => {
+  const {
+    axisMin,
+    axisMax,
+    xScale,
+    plotClipLeft,
+    plotClipRight,
+    canvasCssWidth,
+    visibleRangeMs,
+    measureCtx,
+    measureCache,
+    fontSize,
+    fontFamily,
+  } = params;
+
+  // Domain fallback matches `createAxisRenderer` (use explicit min/max when provided).
+  const domainMin = finiteOrNull(axisMin) ?? xScale.invert(plotClipLeft);
+  const domainMax = finiteOrNull(axisMax) ?? xScale.invert(plotClipRight);
+
+  if (!measureCtx || canvasCssWidth <= 0) {
+    return { tickCount: DEFAULT_TICK_COUNT, tickValues: generateLinearTicks(domainMin, domainMax, DEFAULT_TICK_COUNT) };
+  }
+
+  // Ensure the measurement font matches the overlay labels.
+  measureCtx.font = `${fontSize}px ${fontFamily}`;
+  if (measureCache && measureCache.size > 2000) measureCache.clear();
+
+  // Pre-construct the font part of the cache key to avoid repeated concatenation.
+  const cacheKeyPrefix = measureCache ? `${fontSize}px ${fontFamily}@@` : null;
+
+  for (let tickCount = MAX_TIME_X_TICK_COUNT; tickCount >= MIN_TIME_X_TICK_COUNT; tickCount--) {
+    const tickValues = generateLinearTicks(domainMin, domainMax, tickCount);
+
+    // Compute label extents in *canvas-local CSS px* and ensure adjacent labels don't overlap.
+    let prevRight = Number.NEGATIVE_INFINITY;
+    let ok = true;
+
+    for (let i = 0; i < tickValues.length; i++) {
+      const v = tickValues[i]!;
+      const label = formatTimeTickValue(v, visibleRangeMs);
+      if (label == null) continue;
+
+      const w = (() => {
+        if (!cacheKeyPrefix) return measureCtx.measureText(label).width;
+        const key = cacheKeyPrefix + label;
+        const cached = measureCache!.get(key);
+        if (cached != null) return cached;
+        const measured = measureCtx.measureText(label).width;
+        measureCache!.set(key, measured);
+        return measured;
+      })();
+      const xClip = xScale.scale(v);
+      const xCss = clipXToCanvasCssPx(xClip, canvasCssWidth);
+
+      const anchor: TextOverlayAnchor =
+        tickCount === 1 ? 'middle' : i === 0 ? 'start' : i === tickValues.length - 1 ? 'end' : 'middle';
+
+      const left = anchor === 'start' ? xCss : anchor === 'end' ? xCss - w : xCss - w * 0.5;
+      const right = anchor === 'start' ? xCss + w : anchor === 'end' ? xCss : xCss + w * 0.5;
+
+      if (left < prevRight + MIN_X_LABEL_GAP_CSS_PX) {
+        ok = false;
+        break;
+      }
+      prevRight = right;
+    }
+
+    if (ok) {
+      return { tickCount, tickValues };
+    }
+  }
+
+  return { tickCount: MIN_TIME_X_TICK_COUNT, tickValues: generateLinearTicks(domainMin, domainMax, MIN_TIME_X_TICK_COUNT) };
+};
+
 const computeBaseXDomain = (
   options: ResolvedChartGPUOptions,
   runtimeRawBoundsByIndex?: ReadonlyArray<Bounds | null> | null
 ): { readonly min: number; readonly max: number } => {
   const bounds = computeGlobalBounds(options.series, runtimeRawBoundsByIndex);
-  const baseMin = options.xAxis.min ?? bounds.xMin;
-  const baseMax = options.xAxis.max ?? bounds.xMax;
+  const baseMin = finiteOrUndefined(options.xAxis.min) ?? bounds.xMin;
+  const baseMax = finiteOrUndefined(options.xAxis.max) ?? bounds.xMax;
   return normalizeDomain(baseMin, baseMax);
 };
 
@@ -594,8 +976,8 @@ const computeBaseYDomain = (
   runtimeRawBoundsByIndex?: ReadonlyArray<Bounds | null> | null
 ): { readonly min: number; readonly max: number } => {
   const bounds = computeGlobalBounds(options.series, runtimeRawBoundsByIndex);
-  const yMin = options.yAxis.min ?? bounds.yMin;
-  const yMax = options.yAxis.max ?? bounds.yMax;
+  const yMin = finiteOrUndefined(options.yAxis.min) ?? bounds.yMin;
+  const yMax = finiteOrUndefined(options.yAxis.max) ?? bounds.yMax;
   return normalizeDomain(yMin, yMax);
 };
 
@@ -649,6 +1031,63 @@ const resolveAnimationConfig = (
 
 const resolveIntroAnimationConfig = (animation: ResolvedChartGPUOptions['animation']) => resolveAnimationConfig(animation);
 const resolveUpdateAnimationConfig = (animation: ResolvedChartGPUOptions['animation']) => resolveAnimationConfig(animation);
+
+/**
+ * Computes container-local CSS pixel anchor coordinates for a candlestick tooltip.
+ *
+ * The anchor is positioned near the candle body center for stable tooltip positioning
+ * even when the cursor is at the edge of the candlestick.
+ *
+ * Coordinate transformations:
+ * 1. Domain values (timestamp, open, close) from CandlestickMatch
+ * 2. → xScale/yScale transform to grid-local CSS pixels
+ * 3. → Add gridArea offset to get canvas-local CSS pixels
+ * 4. → Add canvas offset to get container-local CSS pixels
+ *
+ * Returns null if any coordinate computation fails (non-finite values).
+ */
+const computeCandlestickTooltipAnchor = (
+  match: { readonly point: OHLCDataPoint },
+  xScale: LinearScale,
+  yScale: LinearScale,
+  gridArea: GridArea,
+  canvas: HTMLCanvasElement
+): Readonly<{ x: number; y: number }> | null => {
+  const point = match.point;
+  
+  const timestamp = isTupleOHLCDataPoint(point) ? point[0] : point.timestamp;
+  const open = isTupleOHLCDataPoint(point) ? point[1] : point.open;
+  const close = isTupleOHLCDataPoint(point) ? point[2] : point.close;
+
+  if (!Number.isFinite(timestamp) || !Number.isFinite(open) || !Number.isFinite(close)) {
+    return null;
+  }
+
+  // Body center in domain space
+  const bodyMidY = (open + close) / 2;
+
+  // Transform to grid-local CSS pixels
+  const xGridCss = xScale.scale(timestamp);
+  const yGridCss = yScale.scale(bodyMidY);
+
+  if (!Number.isFinite(xGridCss) || !Number.isFinite(yGridCss)) {
+    return null;
+  }
+
+  // Convert to canvas-local CSS pixels
+  const xCanvasCss = gridArea.left + xGridCss;
+  const yCanvasCss = gridArea.top + yGridCss;
+
+  // Convert to container-local CSS pixels
+  const xContainerCss = canvas.offsetLeft + xCanvasCss;
+  const yContainerCss = canvas.offsetTop + yCanvasCss;
+
+  if (!Number.isFinite(xContainerCss) || !Number.isFinite(yContainerCss)) {
+    return null;
+  }
+
+  return { x: xContainerCss, y: yContainerCss };
+};
 
 const computeBaselineForBarsFromData = (seriesConfigs: ReadonlyArray<ResolvedBarSeriesConfig>): number => {
   let yMin = Number.POSITIVE_INFINITY;
@@ -746,6 +1185,15 @@ export function createRenderCoordinator(
   const overlayContainer = gpuContext.canvas.parentElement;
   const overlay: TextOverlay | null = overlayContainer ? createTextOverlay(overlayContainer) : null;
   const legend: Legend | null = overlayContainer ? createLegend(overlayContainer, 'right') : null;
+  const tickMeasureCtx: CanvasRenderingContext2D | null = (() => {
+    try {
+      const c = document.createElement('canvas');
+      return c.getContext('2d');
+    } catch {
+      return null;
+    }
+  })();
+  const tickMeasureCache: Map<string, number> | null = tickMeasureCtx ? new Map() : null;
 
   let disposed = false;
   let currentOptions: ResolvedChartGPUOptions = options;
@@ -951,7 +1399,7 @@ export function createRenderCoordinator(
   // Coordinator-owned runtime series store (cartesian only).
   // - `runtimeRawDataByIndex[i]` owns a mutable array for streaming appends.
   // - `runtimeRawBoundsByIndex[i]` tracks raw bounds for axis auto-bounds and zoom mapping.
-  let runtimeRawDataByIndex: Array<DataPoint[] | null> = new Array(options.series.length).fill(null);
+  let runtimeRawDataByIndex: Array<DataPoint[] | OHLCDataPoint[] | null> = new Array(options.series.length).fill(null);
   let runtimeRawBoundsByIndex: Array<Bounds | null> = new Array(options.series.length).fill(null);
 
   // Baseline sampled series list derived from runtime raw data (used as the “full span” baseline).
@@ -972,7 +1420,7 @@ export function createRenderCoordinator(
   let zoomResampleDue = false;
 
   // Coalesced streaming appends (flushed at the start of `render()`).
-  const pendingAppendByIndex = new Map<number, DataPoint[]>();
+  const pendingAppendByIndex = new Map<number, Array<DataPoint | OHLCDataPoint>>();
 
   // Tracks what the DataStore currently represents for each series index.
   // Used to decide whether `appendSeries(...)` is a correct fast-path.
@@ -983,6 +1431,11 @@ export function createRenderCoordinator(
   // Tooltip is a DOM overlay element; enable by default unless explicitly disabled.
   let tooltip: Tooltip | null =
     overlayContainer && currentOptions.tooltip?.show !== false ? createTooltip(overlayContainer) : null;
+
+  // Cache tooltip state to avoid unnecessary DOM updates
+  let lastTooltipContent: string | null = null;
+  let lastTooltipX: number | null = null;
+  let lastTooltipY: number | null = null;
 
   legend?.update(currentOptions.series, currentOptions.theme);
 
@@ -1107,33 +1560,57 @@ export function createRenderCoordinator(
       if (!s || s.type === 'pie') continue;
       didAppendAny = true;
 
-      let raw = runtimeRawDataByIndex[seriesIndex];
-      if (!raw) {
-        const seed = (s.rawData ?? s.data) as ReadonlyArray<DataPoint>;
-        raw = seed.length === 0 ? [] : seed.slice();
-        runtimeRawDataByIndex[seriesIndex] = raw;
-        runtimeRawBoundsByIndex[seriesIndex] = s.rawBounds ?? computeRawBoundsFromData(raw);
-      }
-
-      // Optional fast-path: if the GPU buffer currently represents the full, unsampled line series,
-      // we can append just the new points to the existing GPU buffer (no full re-upload).
-      if (
-        s.type === 'line' &&
-        s.sampling === 'none' &&
-        isFullSpanZoomBefore &&
-        gpuSeriesKindByIndex[seriesIndex] === 'fullRawLine'
-      ) {
-        try {
-          dataStore.appendSeries(seriesIndex, points);
-          appendedGpuThisFrame.add(seriesIndex);
-        } catch {
-          // If the DataStore has not been initialized for this index (or any other error occurs),
-          // fall back to the normal full upload path later in render().
+      if (s.type === 'candlestick') {
+        // Handle candlestick OHLC data.
+        let raw = runtimeRawDataByIndex[seriesIndex] as OHLCDataPoint[] | null;
+        if (!raw) {
+          const seed = (s.rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>;
+          raw = seed.length === 0 ? [] : seed.slice();
+          runtimeRawDataByIndex[seriesIndex] = raw;
+          runtimeRawBoundsByIndex[seriesIndex] = s.rawBounds ?? null;
         }
-      }
 
-      raw.push(...points);
-      runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(runtimeRawBoundsByIndex[seriesIndex], points);
+        const ohlcPoints = points as unknown as ReadonlyArray<OHLCDataPoint>;
+        raw.push(...ohlcPoints);
+        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithOHLCDataPoints(
+          runtimeRawBoundsByIndex[seriesIndex],
+          ohlcPoints
+        );
+      } else {
+        // Handle other cartesian series (line, area, bar, scatter).
+        let raw = runtimeRawDataByIndex[seriesIndex] as DataPoint[] | null;
+        if (!raw) {
+          const seed = (s.rawData ?? s.data) as ReadonlyArray<DataPoint>;
+          raw = seed.length === 0 ? [] : seed.slice();
+          runtimeRawDataByIndex[seriesIndex] = raw;
+          runtimeRawBoundsByIndex[seriesIndex] = s.rawBounds ?? computeRawBoundsFromData(raw);
+        }
+
+        const dataPoints = points as unknown as ReadonlyArray<DataPoint>;
+        
+        // Optional fast-path: if the GPU buffer currently represents the full, unsampled line series,
+        // we can append just the new points to the existing GPU buffer (no full re-upload).
+        if (
+          s.type === 'line' &&
+          s.sampling === 'none' &&
+          isFullSpanZoomBefore &&
+          gpuSeriesKindByIndex[seriesIndex] === 'fullRawLine'
+        ) {
+          try {
+            dataStore.appendSeries(seriesIndex, dataPoints);
+            appendedGpuThisFrame.add(seriesIndex);
+          } catch {
+            // If the DataStore has not been initialized for this index (or any other error occurs),
+            // fall back to the normal full upload path later in render().
+          }
+        }
+
+        raw.push(...dataPoints);
+        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(
+          runtimeRawBoundsByIndex[seriesIndex],
+          dataPoints
+        );
+      }
     }
 
     pendingAppendByIndex.clear();
@@ -1322,6 +1799,89 @@ export function createRenderCoordinator(
     };
   };
 
+  const buildCandlestickTooltipParams = (
+    seriesIndex: number,
+    dataIndex: number,
+    point: OHLCDataPoint
+  ): TooltipParams => {
+    const s = currentOptions.series[seriesIndex];
+    if (isTupleOHLCDataPoint(point)) {
+      return {
+        seriesName: s?.name ?? '',
+        seriesIndex,
+        dataIndex,
+        value: [point[0], point[1], point[2], point[3], point[4]] as const,
+        color: s?.color ?? '#888',
+      };
+    } else {
+      return {
+        seriesName: s?.name ?? '',
+        seriesIndex,
+        dataIndex,
+        value: [point.timestamp, point.open, point.close, point.low, point.high] as const,
+        color: s?.color ?? '#888',
+      };
+    }
+  };
+
+  // Helper: Find pie slice at pointer position (extracted to avoid duplication)
+  const findPieSliceAtPointer = (
+    series: ResolvedChartGPUOptions['series'],
+    gridX: number,
+    gridY: number,
+    plotWidthCss: number,
+    plotHeightCss: number
+  ): ReturnType<typeof findPieSlice> | null => {
+    const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
+    if (!(maxRadiusCss > 0)) return null;
+
+    for (let i = currentOptions.series.length - 1; i >= 0; i--) {
+      const s = series[i];
+      if (s.type !== 'pie') continue;
+      const pieSeries = s as ResolvedPieSeriesConfig;
+      const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
+      const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
+      const m = findPieSlice(gridX, gridY, { seriesIndex: i, series: pieSeries }, center, radii);
+      if (m) return m;
+    }
+    return null;
+  };
+
+  // Helper: Find candlestick match at pointer position (hoisted to avoid closure allocation)
+  const findCandlestickAtPointer = (
+    series: ResolvedChartGPUOptions['series'],
+    gridX: number,
+    gridY: number,
+    interactionScales: NonNullable<ReturnType<typeof computeInteractionScalesGridCssPx>>
+  ): { params: TooltipParams; match: { point: OHLCDataPoint }; seriesIndex: number } | null => {
+    for (let i = series.length - 1; i >= 0; i--) {
+      const s = series[i];
+      if (s.type !== 'candlestick') continue;
+
+      const cs = s as ResolvedCandlestickSeriesConfig;
+      const barWidthClip = computeCandlestickBodyWidthRange(
+        cs,
+        cs.data,
+        interactionScales.xScale,
+        interactionScales.plotWidthCss
+      );
+
+      const m = findCandlestick(
+        [cs],
+        gridX,
+        gridY,
+        interactionScales.xScale,
+        interactionScales.yScale,
+        barWidthClip
+      );
+      if (!m) continue;
+
+      const params = buildCandlestickTooltipParams(i, m.dataIndex, m.point);
+      return { params, match: { point: m.point }, seriesIndex: i };
+    }
+    return null;
+  };
+
   const onMouseMove = (payload: ChartGPUEventPayload): void => {
     pointerState = {
       source: 'mouse',
@@ -1354,6 +1914,9 @@ export function createRenderCoordinator(
 
     pointerState = { ...pointerState, isInGrid: false, hasPointer: false };
     crosshairRenderer.setVisible(false);
+    lastTooltipContent = null;
+    lastTooltipX = null;
+    lastTooltipY = null;
     tooltip?.hide();
     setInteractionXInternal(null, 'mouse');
     requestRender();
@@ -1446,6 +2009,15 @@ export function createRenderCoordinator(
       const s = currentOptions.series[i]!;
       if (s.type === 'pie') continue;
 
+      if (s.type === 'candlestick') {
+        // Store candlestick raw OHLC data (not for streaming append, but for zoom-aware resampling).
+        const rawOHLC = (s.rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>;
+        const owned = rawOHLC.length === 0 ? [] : rawOHLC.slice();
+        runtimeRawDataByIndex[i] = owned;
+        runtimeRawBoundsByIndex[i] = s.rawBounds ?? null;
+        continue;
+      }
+
       const raw = (s.rawData ?? s.data) as ReadonlyArray<DataPoint>;
       // Coordinator-owned: copy into a mutable array (streaming appends mutate this).
       const owned = raw.length === 0 ? [] : raw.slice();
@@ -1463,7 +2035,20 @@ export function createRenderCoordinator(
         continue;
       }
 
-      const raw = runtimeRawDataByIndex[i] ?? ((s.rawData ?? s.data) as ReadonlyArray<DataPoint>);
+      if (s.type === 'candlestick') {
+        const rawOHLC =
+          (runtimeRawDataByIndex[i] as ReadonlyArray<OHLCDataPoint> | null) ??
+          ((s.rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>);
+        const bounds = runtimeRawBoundsByIndex[i] ?? s.rawBounds ?? undefined;
+        const baselineSampled = s.sampling === 'ohlc' && rawOHLC.length > s.samplingThreshold
+          ? ohlcSample(rawOHLC, s.samplingThreshold)
+          : rawOHLC;
+        next[i] = { ...s, rawData: rawOHLC, rawBounds: bounds, data: baselineSampled };
+        continue;
+      }
+
+      const raw =
+        (runtimeRawDataByIndex[i] as DataPoint[] | null) ?? ((s.rawData ?? s.data) as ReadonlyArray<DataPoint>);
       const bounds = runtimeRawBoundsByIndex[i] ?? s.rawBounds ?? undefined;
       const baselineSampled = sampleSeriesDataPoints(raw, s.sampling, s.samplingThreshold);
       next[i] = { ...s, rawData: raw, rawBounds: bounds, data: baselineSampled };
@@ -1495,8 +2080,6 @@ export function createRenderCoordinator(
         continue;
       }
 
-      const rawData = runtimeRawDataByIndex[i] ?? ((s.rawData ?? s.data) as ReadonlyArray<DataPoint>);
-
       // Fast path: no zoom window / full span. Use baseline resolved `data` (already sampled by resolver).
       const isFullSpan =
         zoomRange == null ||
@@ -1509,6 +2092,31 @@ export function createRenderCoordinator(
         continue;
       }
 
+      // Candlestick series: OHLC-specific slicing + sampling.
+      if (s.type === 'candlestick') {
+        const rawOHLC =
+          (runtimeRawDataByIndex[i] as ReadonlyArray<OHLCDataPoint> | null) ??
+          ((s.rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>);
+        const visibleOHLC = sliceVisibleRangeByOHLC(rawOHLC, visibleX.min, visibleX.max);
+
+        const sampling = s.sampling;
+        const baseThreshold = s.samplingThreshold;
+
+        const baseT = Number.isFinite(baseThreshold) ? Math.max(1, baseThreshold | 0) : 1;
+        const maxTarget = Math.min(MAX_TARGET_POINTS_ABS, Math.max(MIN_TARGET_POINTS, baseT * MAX_TARGET_MULTIPLIER));
+        const target = clampInt(Math.round(baseT / spanFracSafe), MIN_TARGET_POINTS, maxTarget);
+
+        const sampled = sampling === 'ohlc' && visibleOHLC.length > target
+          ? ohlcSample(visibleOHLC, target)
+          : visibleOHLC;
+
+        next[i] = { ...s, data: sampled };
+        continue;
+      }
+
+      // Cartesian series (line, area, bar, scatter).
+      const rawData =
+        (runtimeRawDataByIndex[i] as DataPoint[] | null) ?? ((s.rawData ?? s.data) as ReadonlyArray<DataPoint>);
       const visibleRaw = sliceVisibleRangeByX(rawData, visibleX.min, visibleX.max);
 
       const sampling = s.sampling;
@@ -1534,6 +2142,7 @@ export function createRenderCoordinator(
   const lineRenderers: Array<ReturnType<typeof createLineRenderer>> = [];
   const scatterRenderers: Array<ReturnType<typeof createScatterRenderer>> = [];
   const pieRenderers: Array<ReturnType<typeof createPieRenderer>> = [];
+  const candlestickRenderers: Array<ReturnType<typeof createCandlestickRenderer>> = [];
   const barRenderer = createBarRenderer(device, { targetFormat });
 
   const ensureAreaRendererCount = (count: number): void => {
@@ -1576,10 +2185,21 @@ export function createRenderCoordinator(
     }
   };
 
+  const ensureCandlestickRendererCount = (count: number): void => {
+    while (candlestickRenderers.length > count) {
+      const r = candlestickRenderers.pop();
+      r?.dispose();
+    }
+    while (candlestickRenderers.length < count) {
+      candlestickRenderers.push(createCandlestickRenderer(device, { targetFormat }));
+    }
+  };
+
   ensureAreaRendererCount(currentOptions.series.length);
   ensureLineRendererCount(currentOptions.series.length);
   ensureScatterRendererCount(currentOptions.series.length);
   ensurePieRendererCount(currentOptions.series.length);
+  ensureCandlestickRendererCount(currentOptions.series.length);
 
   const assertNotDisposed = (): void => {
     if (disposed) throw new Error('RenderCoordinator is disposed.');
@@ -1677,9 +2297,22 @@ export function createRenderCoordinator(
     // Tooltip enablement may change at runtime.
     if (overlayContainer) {
       const shouldHaveTooltip = currentOptions.tooltip?.show !== false;
-      if (shouldHaveTooltip && !tooltip) tooltip = createTooltip(overlayContainer);
-      if (!shouldHaveTooltip && tooltip) tooltip.hide();
+      if (shouldHaveTooltip && !tooltip) {
+        tooltip = createTooltip(overlayContainer);
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
+      }
+      if (!shouldHaveTooltip && tooltip) {
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
+        tooltip.hide();
+      }
     } else {
+      lastTooltipContent = null;
+      lastTooltipX = null;
+      lastTooltipY = null;
       tooltip?.hide();
     }
 
@@ -1688,6 +2321,7 @@ export function createRenderCoordinator(
     ensureLineRendererCount(nextCount);
     ensureScatterRendererCount(nextCount);
     ensurePieRendererCount(nextCount);
+    ensureCandlestickRendererCount(nextCount);
 
     // When the series count shrinks, explicitly destroy per-index GPU buffers for removed series.
     // This avoids recreating the entire DataStore and keeps existing buffers for retained indices.
@@ -1799,10 +2433,10 @@ export function createRenderCoordinator(
 
     const existing = pendingAppendByIndex.get(seriesIndex);
     if (existing) {
-      existing.push(...newPoints);
+      existing.push(...(newPoints as Array<DataPoint | OHLCDataPoint>));
     } else {
       // Copy into a mutable staging array so repeated appends coalesce without extra allocations.
-      pendingAppendByIndex.set(seriesIndex, Array.from(newPoints));
+      pendingAppendByIndex.set(seriesIndex, Array.from(newPoints as Array<DataPoint | OHLCDataPoint>));
     }
 
     // Coalesce appends + any required resampling + GPU streaming updates into a single flush.
@@ -1820,6 +2454,8 @@ export function createRenderCoordinator(
       case 'scatter':
         return false;
       case 'pie':
+        return false;
+      case 'candlestick':
         return false;
       default:
         return assertUnreachable(series);
@@ -1859,7 +2495,8 @@ export function createRenderCoordinator(
             case 'line':
             case 'area':
             case 'bar':
-            case 'scatter': {
+            case 'scatter':
+            case 'candlestick': {
               if (s.data.length > 0) return true;
               break;
             }
@@ -1937,6 +2574,36 @@ export function createRenderCoordinator(
       .range(plotClipRect.left, plotClipRect.right);
     const yScale = createLinearScale().domain(yBaseDomain.min, yBaseDomain.max).range(plotClipRect.bottom, plotClipRect.top);
 
+    // Story 6: compute an x tick count that prevents label overlap (time axis only).
+    // IMPORTANT: compute in CSS px, since labels are DOM elements in CSS px.
+    const canvasCssWidth = gpuContext.canvas.clientWidth;
+    const visibleXRangeMs = Math.abs(visibleXDomain.max - visibleXDomain.min);
+
+    let xTickCount = DEFAULT_TICK_COUNT;
+    let xTickValues: readonly number[] = [];
+    if (currentOptions.xAxis.type === 'time') {
+      const computed = computeAdaptiveTimeXAxisTicks({
+        axisMin: finiteOrNull(currentOptions.xAxis.min),
+        axisMax: finiteOrNull(currentOptions.xAxis.max),
+        xScale,
+        plotClipLeft: plotClipRect.left,
+        plotClipRight: plotClipRect.right,
+        canvasCssWidth,
+        visibleRangeMs: visibleXRangeMs,
+        measureCtx: tickMeasureCtx,
+        measureCache: tickMeasureCache ?? undefined,
+        fontSize: currentOptions.theme.fontSize,
+        fontFamily: currentOptions.theme.fontFamily || 'sans-serif',
+      });
+      xTickCount = computed.tickCount;
+      xTickValues = computed.tickValues;
+    } else {
+      // Keep existing behavior for non-time x axes.
+      const domainMin = finiteOrUndefined(currentOptions.xAxis.min) ?? xScale.invert(plotClipRect.left);
+      const domainMax = finiteOrUndefined(currentOptions.xAxis.max) ?? xScale.invert(plotClipRect.right);
+      xTickValues = generateLinearTicks(domainMin, domainMax, xTickCount);
+    }
+
     const interactionScales = computeInteractionScalesGridCssPx(gridArea, {
       xDomain: { min: visibleXDomain.min, max: visibleXDomain.max },
       yDomain: yBaseDomain,
@@ -1999,7 +2666,8 @@ export function createRenderCoordinator(
         'x',
         gridArea,
         currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor
+        currentOptions.theme.axisTickColor,
+        xTickCount
       );
       yAxisRenderer.prepare(
         currentOptions.yAxis,
@@ -2007,7 +2675,8 @@ export function createRenderCoordinator(
         'y',
         gridArea,
         currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor
+        currentOptions.theme.axisTickColor,
+        DEFAULT_TICK_COUNT
       );
     }
 
@@ -2090,47 +2759,52 @@ export function createRenderCoordinator(
           // - In 'item' mode, pick a deterministic single entry (first matching series).
           const matches = findPointsAtX(seriesForRender, effectivePointer.gridX, interactionScales.xScale);
           if (matches.length === 0) {
+            lastTooltipContent = null;
+            lastTooltipX = null;
+            lastTooltipY = null;
             tooltip.hide();
           } else if (trigger === 'axis') {
             const paramsArray = matches.map((m) => buildTooltipParams(m.seriesIndex, m.dataIndex, m.point));
             const content = formatter
               ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
               : formatTooltipAxis(paramsArray);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
             const m0 = matches[0];
             const params = buildTooltipParams(m0.seriesIndex, m0.dataIndex, m0.point);
             const content = formatter ? (formatter as (p: TooltipParams) => string)(params) : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           }
         } else if (trigger === 'axis') {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
-          const pieMatch = (() => {
-            const plotWidthCss = interactionScales.plotWidthCss;
-            const plotHeightCss = interactionScales.plotHeightCss;
-            const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
-            if (!(maxRadiusCss > 0)) return null;
-
-            for (let i = currentOptions.series.length - 1; i >= 0; i--) {
-              const s = seriesForRender[i];
-              if (s.type !== 'pie') continue;
-              const pieSeries = s as ResolvedPieSeriesConfig;
-              const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
-              const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
-              const m = findPieSlice(
-                effectivePointer.gridX,
-                effectivePointer.gridY,
-                { seriesIndex: i, series: pieSeries },
-                center,
-                radii
-              );
-              if (m) return m;
-            }
-            return null;
-          })();
+          const pieMatch = findPieSliceAtPointer(
+            seriesForRender,
+            effectivePointer.gridX,
+            effectivePointer.gridY,
+            interactionScales.plotWidthCss,
+            interactionScales.plotHeightCss
+          );
 
           if (pieMatch) {
             const params: TooltipParams = {
@@ -2144,47 +2818,109 @@ export function createRenderCoordinator(
             const content = formatter
               ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)([params])
               : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
+            // Candlestick body hit-testing (mouse, axis trigger): include only when inside candle body.
+            const candlestickResult = findCandlestickAtPointer(
+              seriesForRender,
+              effectivePointer.gridX,
+              effectivePointer.gridY,
+              interactionScales
+            );
+
             const matches = findPointsAtX(seriesForRender, effectivePointer.gridX, interactionScales.xScale);
             if (matches.length === 0) {
-              tooltip.hide();
+              if (candlestickResult) {
+                const paramsArray = [candlestickResult.params];
+                const content = formatter
+                  ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
+                  : formatTooltipAxis(paramsArray);
+                if (content) {
+                  // Use candlestick anchor for tooltip positioning
+                  const anchor = computeCandlestickTooltipAnchor(
+                    candlestickResult.match,
+                    interactionScales.xScale,
+                    interactionScales.yScale,
+                    gridArea,
+                    canvas
+                  );
+                  const tooltipX = anchor?.x ?? containerX;
+                  const tooltipY = anchor?.y ?? containerY;
+                  if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                    lastTooltipContent = content;
+                    lastTooltipX = tooltipX;
+                    lastTooltipY = tooltipY;
+                    tooltip.show(tooltipX, tooltipY, content);
+                  }
+                } else {
+                  lastTooltipContent = null;
+                  lastTooltipX = null;
+                  lastTooltipY = null;
+                  tooltip.hide();
+                }
+              } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
             } else {
               const paramsArray = matches.map((m) => buildTooltipParams(m.seriesIndex, m.dataIndex, m.point));
+              if (candlestickResult) paramsArray.push(candlestickResult.params);
               const content = formatter
                 ? (formatter as (p: ReadonlyArray<TooltipParams>) => string)(paramsArray)
                 : formatTooltipAxis(paramsArray);
-              if (content) tooltip.show(containerX, containerY, content);
-              else tooltip.hide();
+              if (content) {
+                // Use candlestick anchor if candlestick is present in tooltip
+                let tooltipX = containerX;
+                let tooltipY = containerY;
+                if (candlestickResult) {
+                  const anchor = computeCandlestickTooltipAnchor(
+                    candlestickResult.match,
+                    interactionScales.xScale,
+                    interactionScales.yScale,
+                    gridArea,
+                    canvas
+                  );
+                  if (anchor) {
+                    tooltipX = anchor.x;
+                    tooltipY = anchor.y;
+                  }
+                }
+                if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                  lastTooltipContent = content;
+                  lastTooltipX = tooltipX;
+                  lastTooltipY = tooltipY;
+                  tooltip.show(tooltipX, tooltipY, content);
+                }
+              } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
             }
           }
         } else {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
-          const pieMatch = (() => {
-            const plotWidthCss = interactionScales.plotWidthCss;
-            const plotHeightCss = interactionScales.plotHeightCss;
-            const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
-            if (!(maxRadiusCss > 0)) return null;
-
-            for (let i = currentOptions.series.length - 1; i >= 0; i--) {
-              const s = seriesForRender[i];
-              if (s.type !== 'pie') continue;
-              const pieSeries = s as ResolvedPieSeriesConfig;
-              const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
-              const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
-              const m = findPieSlice(
-                effectivePointer.gridX,
-                effectivePointer.gridY,
-                { seriesIndex: i, series: pieSeries },
-                center,
-                radii
-              );
-              if (m) return m;
-            }
-            return null;
-          })();
+          const pieMatch = findPieSliceAtPointer(
+            seriesForRender,
+            effectivePointer.gridX,
+            effectivePointer.gridY,
+            interactionScales.plotWidthCss,
+            interactionScales.plotHeightCss
+          );
 
           if (pieMatch) {
             const params: TooltipParams = {
@@ -2197,9 +2933,55 @@ export function createRenderCoordinator(
             const content = formatter
               ? (formatter as (p: TooltipParams) => string)(params)
               : formatTooltipItem(params);
-            if (content) tooltip.show(containerX, containerY, content);
-            else tooltip.hide();
+            if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+              lastTooltipContent = content;
+              lastTooltipX = containerX;
+              lastTooltipY = containerY;
+              tooltip.show(containerX, containerY, content);
+            } else if (!content) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
+              tooltip.hide();
+            }
           } else {
+            // Candlestick body hit-testing (mouse, item trigger): prefer candle body over nearest-point logic.
+            const candlestickResult = findCandlestickAtPointer(
+              seriesForRender,
+              effectivePointer.gridX,
+              effectivePointer.gridY,
+              interactionScales
+            );
+            if (candlestickResult) {
+              const content = formatter
+                ? (formatter as (p: TooltipParams) => string)(candlestickResult.params)
+                : formatTooltipItem(candlestickResult.params);
+              if (content) {
+                // Use candlestick anchor for tooltip positioning
+                const anchor = computeCandlestickTooltipAnchor(
+                  candlestickResult.match,
+                  interactionScales.xScale,
+                  interactionScales.yScale,
+                  gridArea,
+                  canvas
+                );
+                const tooltipX = anchor?.x ?? containerX;
+                const tooltipY = anchor?.y ?? containerY;
+                if (content !== lastTooltipContent || tooltipX !== lastTooltipX || tooltipY !== lastTooltipY) {
+                  lastTooltipContent = content;
+                  lastTooltipX = tooltipX;
+                  lastTooltipY = tooltipY;
+                  tooltip.show(tooltipX, tooltipY, content);
+                }
+              } else {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
+              return;
+            }
+
             const match = findNearestPoint(
               seriesForRender,
               effectivePointer.gridX,
@@ -2208,21 +2990,39 @@ export function createRenderCoordinator(
               interactionScales.yScale
             );
             if (!match) {
+              lastTooltipContent = null;
+              lastTooltipX = null;
+              lastTooltipY = null;
               tooltip.hide();
             } else {
               const params = buildTooltipParams(match.seriesIndex, match.dataIndex, match.point);
               const content = formatter
                 ? (formatter as (p: TooltipParams) => string)(params)
                 : formatTooltipItem(params);
-              if (content) tooltip.show(containerX, containerY, content);
-              else tooltip.hide();
+              if (content && (content !== lastTooltipContent || containerX !== lastTooltipX || containerY !== lastTooltipY)) {
+                lastTooltipContent = content;
+                lastTooltipX = containerX;
+                lastTooltipY = containerY;
+                tooltip.show(containerX, containerY, content);
+              } else if (!content) {
+                lastTooltipContent = null;
+                lastTooltipX = null;
+                lastTooltipY = null;
+                tooltip.hide();
+              }
             }
           }
         }
       } else {
+        lastTooltipContent = null;
+        lastTooltipX = null;
+        lastTooltipY = null;
         tooltip.hide();
       }
     } else {
+      lastTooltipContent = null;
+      lastTooltipX = null;
+      lastTooltipY = null;
       tooltip?.hide();
     }
 
@@ -2314,6 +3114,11 @@ export function createRenderCoordinator(
           pieRenderers[i].prepare(s, gridArea);
           break;
         }
+        case 'candlestick': {
+          // Candlestick renderer handles clipping internally, no intro animation for now.
+          candlestickRenderers[i].prepare(s, s.data, xScale, yScale, gridArea, currentOptions.theme.backgroundColor);
+          break;
+        }
         default:
           assertUnreachable(s);
       }
@@ -2373,6 +3178,11 @@ export function createRenderCoordinator(
     }
     barRenderer.render(pass);
     for (let i = 0; i < seriesForRender.length; i++) {
+      if (seriesForRender[i].type === 'candlestick') {
+        candlestickRenderers[i].render(pass);
+      }
+    }
+    for (let i = 0; i < seriesForRender.length; i++) {
       if (seriesForRender[i].type === 'scatter') {
         scatterRenderers[i].render(pass);
       }
@@ -2427,23 +3237,25 @@ export function createRenderCoordinator(
       overlay.clear();
       if (!hasCartesianSeries) return;
 
-      // Mirror tick generation logic from `createAxisRenderer` exactly (tick count and domain fallback).
-      const xTickCount = DEFAULT_TICK_COUNT;
       const xTickLengthCssPx = currentOptions.xAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const xDomainMin = currentOptions.xAxis.min ?? xScale.invert(plotClipRect.left);
-      const xDomainMax = currentOptions.xAxis.max ?? xScale.invert(plotClipRect.right);
-      const xTickStep = xTickCount === 1 ? 0 : (xDomainMax - xDomainMin) / (xTickCount - 1);
-      const xFormatter = createTickFormatter(xTickStep);
       const xLabelY = plotBottomCss + xTickLengthCssPx + LABEL_PADDING_CSS_PX + currentOptions.theme.fontSize * 0.5;
+      const isTimeXAxis = currentOptions.xAxis.type === 'time';
+      const xFormatter = (() => {
+        if (isTimeXAxis) return null;
+        const xDomainMin = finiteOrUndefined(currentOptions.xAxis.min) ?? xScale.invert(plotClipRect.left);
+        const xDomainMax = finiteOrUndefined(currentOptions.xAxis.max) ?? xScale.invert(plotClipRect.right);
+        const xTickStep = xTickCount === 1 ? 0 : (xDomainMax - xDomainMin) / (xTickCount - 1);
+        return createTickFormatter(xTickStep);
+      })();
 
-      for (let i = 0; i < xTickCount; i++) {
-        const t = xTickCount === 1 ? 0.5 : i / (xTickCount - 1);
-        const v = xDomainMin + t * (xDomainMax - xDomainMin);
+      for (let i = 0; i < xTickValues.length; i++) {
+        const v = xTickValues[i]!;
         const xClip = xScale.scale(v);
         const xCss = clipXToCanvasCssPx(xClip, canvasCssWidth);
 
-        const anchor: TextOverlayAnchor = i === 0 ? 'start' : i === xTickCount - 1 ? 'end' : 'middle';
-        const label = formatTickValue(xFormatter, v);
+        const anchor: TextOverlayAnchor =
+          xTickValues.length === 1 ? 'middle' : i === 0 ? 'start' : i === xTickValues.length - 1 ? 'end' : 'middle';
+        const label = isTimeXAxis ? formatTimeTickValue(v, visibleXRangeMs) : formatTickValue(xFormatter!, v);
         if (label == null) continue;
         const span = overlay.addLabel(label, offsetX + xCss, offsetY + xLabelY, {
           fontSize: currentOptions.theme.fontSize,
@@ -2456,8 +3268,8 @@ export function createRenderCoordinator(
 
       const yTickCount = DEFAULT_TICK_COUNT;
       const yTickLengthCssPx = currentOptions.yAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const yDomainMin = currentOptions.yAxis.min ?? yScale.invert(plotClipRect.bottom);
-      const yDomainMax = currentOptions.yAxis.max ?? yScale.invert(plotClipRect.top);
+      const yDomainMin = finiteOrUndefined(currentOptions.yAxis.min) ?? yScale.invert(plotClipRect.bottom);
+      const yDomainMax = finiteOrUndefined(currentOptions.yAxis.max) ?? yScale.invert(plotClipRect.top);
       const yTickStep = yTickCount === 1 ? 0 : (yDomainMax - yDomainMin) / (yTickCount - 1);
       const yFormatter = createTickFormatter(yTickStep);
       const yLabelX = plotLeftCss - yTickLengthCssPx - LABEL_PADDING_CSS_PX;
@@ -2588,6 +3400,11 @@ export function createRenderCoordinator(
       pieRenderers[i].dispose();
     }
     pieRenderers.length = 0;
+
+    for (let i = 0; i < candlestickRenderers.length; i++) {
+      candlestickRenderers[i].dispose();
+    }
+    candlestickRenderers.length = 0;
 
     barRenderer.dispose();
 
