@@ -194,7 +194,7 @@ export function createDataZoomSlider(
           return;
         }
         case 'pan-window': {
-          zoomState.pan(dxPercent);
+          zoomState.setRange(startRange.start + dxPercent, startRange.end + dxPercent);
           return;
         }
       }
