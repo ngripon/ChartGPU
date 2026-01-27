@@ -993,25 +993,39 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
       
       // Get theme config for label styling
       const themeConfig = this.resolveThemeConfig();
-      
+      const axisNameFontSize = Math.max(
+        themeConfig.fontSize + 1,
+        Math.round(themeConfig.fontSize * 1.15)
+      );
+
       // Add x-axis labels
       for (const label of axisLabelsMsg.xLabels) {
-        this.textOverlay.addLabel(label.text, label.x, label.y, {
-          fontSize: themeConfig.fontSize,
+        const span = this.textOverlay.addLabel(label.text, label.x, label.y, {
+          fontSize: label.isTitle ? axisNameFontSize : themeConfig.fontSize,
           color: themeConfig.textColor,
-          anchor: 'middle',
+          anchor: label.anchor ?? 'middle',
           rotation: label.rotation,
         });
+        span.dir = 'auto';
+        span.style.fontFamily = themeConfig.fontFamily;
+        if (label.isTitle) {
+          span.style.fontWeight = '600';
+        }
       }
-      
+
       // Add y-axis labels
       for (const label of axisLabelsMsg.yLabels) {
-        this.textOverlay.addLabel(label.text, label.x, label.y, {
-          fontSize: themeConfig.fontSize,
+        const span = this.textOverlay.addLabel(label.text, label.x, label.y, {
+          fontSize: label.isTitle ? axisNameFontSize : themeConfig.fontSize,
           color: themeConfig.textColor,
-          anchor: 'end',
+          anchor: label.anchor ?? 'end',
           rotation: label.rotation,
         });
+        span.dir = 'auto';
+        span.style.fontFamily = themeConfig.fontFamily;
+        if (label.isTitle) {
+          span.style.fontWeight = '600';
+        }
       }
     }
     

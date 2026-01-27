@@ -6,18 +6,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ChartGPU is a GPU-accelerated charting library built with WebGPU for high-performance data visualization in the browser. The library is written in TypeScript and provides both functional and class-based APIs.
 
+**Current version**: 0.1.6 (package.json)
+**Repository**: https://github.com/chartgpu/chartgpu
+**NPM package**: `chartgpu`
+**License**: MIT
+
+## Recent Work (Current Branch: worker-thread-offscreen-canvas-support)
+
+Recent enhancements have focused on worker-based rendering with OffscreenCanvas support:
+
+- **Worker thread rendering**: Full OffscreenCanvas support with transferControlToOffscreen()
+- **Pointer event handling**: Pre-computed grid coordinates on main thread, forwarded to worker
+- **Resize optimization**: RAF-batched resize handling with contentBoxSize from ResizeObserver
+- **Tooltip enhancement**: Complete tooltip content and positioning calculated in worker, RAF-batched updates on main thread
+- **Zoom state management**: Echo suppression for zoom changes to prevent feedback loops
+- **Performance monitoring**: Enhanced FPS, frame time, and memory metrics
+- **Zero-copy data transfer**: Optimized ArrayBuffer transfer for large datasets
+- **Documentation**: Comprehensive worker API guides and architecture documentation
+
+See recent commits for implementation details:
+- Fix worker thread ResizeObserver to use contentBoxSize
+- Enhance tooltip and interaction support in worker mode
+- Update zoom state handling and initialization in worker
+- Implement zoom change handling with echo suppression
+- Enhance pointer event handling with wheel support
+
 ## Development Commands
 
 ### Build and Development
 - `npm run dev` - Start development server (opens at http://localhost:5176/examples/)
 - `npm run build` - Compile TypeScript and build the library (runs `tsc && vite build`)
+- `npm run build:examples` - Build examples for production
 - `npm run prepublishOnly` - Build the library before publishing (automatically runs on publish)
+
+### Testing and Benchmarking
+- `npm run acceptance:animation-controller` - Test animation controller
+- `npm run acceptance:sampling-config` - Test sampling configuration
+- `npm run acceptance:zoom-state` - Test zoom state management
+- `npm run acceptance:lttb-sample` - Test LTTB downsampling
+- `npm run acceptance:auto-scroll-policy` - Test auto-scroll behavior
+- `npm run acceptance:data-store-append` - Test streaming data append
+- `npm run acceptance:easing` - Test animation easing functions
+- `npm run acceptance:line-style-color` - Test line style/color resolution
+- `npm run acceptance:area-style-color` - Test area style/color resolution
+- `npm run acceptance:ohlc-sample` - Test OHLC downsampling
+- `npm run benchmark:transfer` - Benchmark data transfer performance
 
 ### Browser Requirements
 WebGPU support required:
-- Chrome/Edge 113+
-- Safari 18+
-- Firefox not yet supported
+- Chrome/Edge 113+ (WebGPU enabled by default)
+- Safari 18+ (WebGPU enabled by default)
+- Firefox: not supported (WebGPU support in development)
+
+### React Integration
+React bindings available via [`chartgpu-react`](https://github.com/ChartGPU/chartgpu-react):
+- `npm install chartgpu-react`
+- Provides `<ChartGPUChart>` component with React-friendly API
+- Supports both main thread and worker-based rendering
 
 ## Architecture
 
@@ -38,32 +83,49 @@ The codebase follows a **functional-first architecture** with class wrappers for
 
 ### Key Modules
 
-#### GPUContext (`src/core/GPUContext.ts`)
-Manages WebGPU adapter and device initialization. Provides both functional API (`createGPUContext`, `initializeGPUContext`) and class-based API (`GPUContext.create()`).
+#### Core Modules
 
-**Functional API pattern:**
-```typescript
-const context = createGPUContext(canvas);
-const initialized = await initializeGPUContext(context);
-const destroyed = destroyGPUContext(initialized);
-```
+**GPUContext** ([src/core/GPUContext.ts](src/core/GPUContext.ts))
+Manages WebGPU adapter and device initialization. Provides both functional API (`createGPUContext`, `initializeGPUContext`) and class-based API (`GPUContext.create()`).
 
 **Key responsibilities:**
 - WebGPU adapter/device request and initialization
 - Canvas configuration with device pixel ratio handling
 - Texture format detection and configuration
 - Device lifecycle management and cleanup
+- Supports both `HTMLCanvasElement` and `OffscreenCanvas` for worker mode
 
-#### RenderScheduler (`src/core/RenderScheduler.ts`)
-Manages requestAnimationFrame-based render loop at 60fps with delta time tracking.
+**RenderScheduler** ([src/core/RenderScheduler.ts](src/core/RenderScheduler.ts))
+Manages requestAnimationFrame-based render loop at 60fps with delta time tracking and performance metrics.
 
 **State management pattern:**
 - Public readonly state (`RenderSchedulerState`)
 - Internal mutable state stored in `Map<symbol, InternalState>`
 - Functions return new public state objects
 - Internal state tracked separately using unique symbol IDs
+- Performance tracking: FPS, frame times, frame drops
 
-#### ChartGPU (`src/ChartGPU.ts`)
+**RenderCoordinator** ([src/core/createRenderCoordinator.ts](src/core/createRenderCoordinator.ts))
+**Not exported from public API** - orchestrates all rendering operations and manages renderer lifecycle.
+
+**Key responsibilities:**
+- Coordinates multiple specialized renderers (line, area, bar, scatter, candlestick, pie)
+- Manages zoom state and data transformations
+- Handles tooltip and legend updates
+- Processes pointer events and interaction state
+- Manages animation state and transitions
+
+**AnimationController** ([src/core/createAnimationController.ts](src/core/createAnimationController.ts))
+**Not exported from public API** - manages chart animations and transitions.
+
+**Key features:**
+- Configurable animation curves (linear, easeInOut, etc.)
+- Progress tracking and completion callbacks
+- Multiple animation modes (default, startup)
+
+#### Chart API
+
+**ChartGPU** ([src/ChartGPU.ts](src/ChartGPU.ts))
 Main chart API - `ChartGPU.create(container, options)` creates chart instances.
 
 **Instance lifecycle:**
@@ -71,8 +133,35 @@ Main chart API - `ChartGPU.create(container, options)` creates chart instances.
 - Initializes GPUContext
 - Manages canvas sizing and configuration
 - Handles device loss and disposal
+- Supports event system (click, mouseover, mouseout, crosshairMove)
+- Performance metrics API (FPS, frame times, drops)
 
-#### DataStore (`src/data/createDataStore.ts`)
+**Worker Mode** ([src/worker/](src/worker/))
+Offloads rendering to a Web Worker for main thread performance with OffscreenCanvas.
+
+**Key components:**
+- `ChartGPU.createInWorker()` / `createChartInWorker()` - creates chart in worker thread
+- `ChartGPUWorkerProxy` - main thread proxy implementing ChartGPUInstance API
+- `ChartGPUWorkerController` - worker thread chart controller
+- Message-based protocol for all chart operations (see protocol.ts)
+- Zero-copy data transfer with ArrayBuffer transfer
+- OffscreenCanvas with `transferControlToOffscreen()` support
+
+**Worker architecture features:**
+- **Main thread proxy**: Manages DOM overlays (tooltip, legend, text, slider), event forwarding (pointer events with pre-computed grid coordinates), RAF-batched resize handling, and ResizeObserver with DPR monitoring
+- **Worker thread controller**: Full WebGPU rendering, hit-testing, data management, and MessageChannel-based render loop
+- **Bidirectional messaging**: Main→Worker (init, setOption, appendData, resize, forwardPointerEvent, setZoomRange, setInteractionX, dispose) and Worker→Main (ready, rendered, tooltipUpdate, legendUpdate, axisLabelsUpdate, hoverChange, click, crosshairMove, zoomChange, deviceLost, disposed, error)
+- **Performance benefits**: Main thread remains responsive during heavy rendering, optimal for large datasets (>10K points), real-time streaming, and mobile/low-power devices
+
+**Documentation:**
+- [Worker API Guide](docs/api/worker.md) - Public API usage and examples
+- [Worker Protocol](docs/api/worker-protocol.md) - Message protocol specification
+- [Worker Architecture](docs/internal/WORKER_ARCHITECTURE.md) - Internal architecture details
+- [Worker Integration](docs/internal/WORKER_THREAD_INTEGRATION.md) - Implementation notes
+
+#### Data Management
+
+**DataStore** ([src/data/createDataStore.ts](src/data/createDataStore.ts))
 **Not exported from public API** - internal module for GPU buffer management.
 
 **Key features:**
@@ -81,17 +170,105 @@ Main chart API - `ChartGPU.create(container, options)` creates chart instances.
 - Hash-based change detection (FNV-1a on Float32 bit patterns)
 - Buffer reuse when data size fits existing capacity
 - Minimum buffer size: 4 bytes (enforced)
+- Supports streaming data append operations
 
-#### OptionResolver (`src/config/OptionResolver.ts`)
-Resolves user options against defaults following specific patterns:
+**Data Utilities** ([src/data/](src/data/))
+- `packDataPoints()` / `packOHLCDataPoints()` - zero-copy transfer helpers for worker mode
+- `lttbSample()` - Largest-Triangle-Three-Buckets downsampling algorithm
+- `ohlcSample()` - OHLC-specific downsampling for candlestick charts
+- `sampleSeries()` - Unified series sampling coordination
+- `createStreamBuffer()` - streaming buffer management for real-time data
+
+**Performance optimizations:**
+- Zero-copy data transfer using ArrayBuffer transfer (not SharedArrayBuffer)
+- Incremental append operations for streaming data (see docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md)
+- Automatic downsampling for large datasets to maintain 60 FPS
+- GPU buffer reuse when data size fits existing capacity
+- Hash-based change detection to avoid redundant uploads
+
+#### Configuration
+
+**OptionResolver** ([src/config/OptionResolver.ts](src/config/OptionResolver.ts))
+Resolves user options against defaults following specific patterns.
 
 **Resolution behavior:**
 - Grid defaults: `left: 60, right: 20, top: 40, bottom: 40`
 - Palette fallback: user palette → default palette → `['#000000']`
 - Series colors: explicit `series[i].color` → `palette[i % palette.length]`
 - Line style: per-series `lineStyle` merged with `defaultLineStyle`
+- Supports multiple series types: line, area, bar, scatter, candlestick, pie
 
-#### Scales (`src/utils/scales.ts`)
+**Themes** ([src/themes/](src/themes/))
+Theme system with dark and light presets.
+
+**Available themes:**
+- `darkTheme` - dark mode color scheme
+- `lightTheme` - light mode color scheme
+- `getTheme(name)` - retrieve theme by name
+
+#### Interaction System
+
+**Event Manager** ([src/interaction/createEventManager.ts](src/interaction/createEventManager.ts))
+**Not exported from public API** - manages chart interaction events.
+
+**Key features:**
+- Pointer event handling
+- Hover state management
+- Click detection
+- Crosshair movement tracking
+
+**Zoom State** ([src/interaction/createZoomState.ts](src/interaction/createZoomState.ts))
+**Not exported from public API** - manages chart zoom/pan state.
+
+**Key features:**
+- Zoom in/out with configurable anchor points
+- Pan operations
+- Percent-based zoom ranges (0-100)
+- onChange callbacks for zoom updates
+
+**Chart Sync** ([src/interaction/createChartSync.ts](src/interaction/createChartSync.ts))
+Synchronizes interaction state (crosshair position) across multiple charts.
+
+**Hit Testing Utilities:**
+- `findNearestPoint()` - cartesian point hit testing
+- `findCandlestick()` - candlestick body hit testing
+- `findPieSlice()` - pie slice hit testing
+- `findPointsAtX()` - find all points at x coordinate
+
+#### UI Components
+
+**Components** ([src/components/](src/components/))
+**Not exported from public API** - UI overlay components.
+
+**Available components:**
+- `createTooltip()` - tooltip display and formatting
+- `createLegend()` - series legend with interactive toggle
+- `createDataZoomSlider()` - zoom range slider control
+- `createTextOverlay()` - axis labels and text rendering
+
+#### Renderers
+
+**Specialized Renderers** ([src/renderers/](src/renderers/))
+**Not exported from public API** - WebGPU rendering implementations for each chart type.
+
+**Available renderers:**
+- `createLineRenderer()` - line charts
+- `createAreaRenderer()` - area charts
+- `createBarRenderer()` - bar charts
+- `createScatterRenderer()` - scatter plots
+- `createCandlestickRenderer()` - candlestick/OHLC charts
+- `createPieRenderer()` - pie/donut charts
+- `createGridRenderer()` - grid lines
+- `createAxisRenderer()` - axis lines
+- `createCrosshairRenderer()` - crosshair overlay
+- `createHighlightRenderer()` - point highlighting
+
+**Renderer Utils** ([src/renderers/rendererUtils.ts](src/renderers/rendererUtils.ts))
+Shared WebGPU utilities for pipeline creation, uniforms, and shaders.
+
+#### Utilities
+
+**Scales** ([src/utils/scales.ts](src/utils/scales.ts))
 Pure utility for linear and category scale mapping.
 
 **Critical behaviors:**
@@ -100,25 +277,89 @@ Pure utility for linear and category scale mapping.
 - Zero-span domain handling: returns range midpoint for `scale()`, returns domain min for `invert()`
 - Category scales: evenly distribute categories across the range; unknown categories map to `NaN`; duplicate categories in a domain throw
 
+**Other Utilities:**
+- `colors.ts` - color parsing and conversion
+- `easing.ts` - animation easing functions
+- `checkWebGPU.ts` - WebGPU support detection
+
 ### Directory Structure
 
 ```
 src/
-├── core/           # Core WebGPU infrastructure
-│   ├── GPUContext.ts        # WebGPU device/adapter management
-│   └── RenderScheduler.ts   # 60fps render loop
-├── config/         # Options and configuration
-│   ├── types.ts             # Type definitions
-│   ├── defaults.ts          # Default values
-│   └── OptionResolver.ts    # Option resolution logic
-├── data/           # Data management (internal, not exported)
-│   └── createDataStore.ts   # GPU buffer caching
-├── renderers/      # Rendering utilities
-│   └── rendererUtils.ts     # WebGPU helpers (pipelines, uniforms, shaders)
-├── utils/          # Utilities
-│   └── scales.ts            # Scale mapping
-├── shaders/        # WGSL shader files
-└── index.ts        # Public API exports
+├── core/              # Core WebGPU infrastructure
+│   ├── GPUContext.ts              # WebGPU device/adapter management
+│   ├── RenderScheduler.ts         # 60fps render loop
+│   ├── createRenderCoordinator.ts # Rendering orchestration
+│   └── createAnimationController.ts # Animation system
+├── config/            # Options and configuration
+│   ├── types.ts                   # Type definitions (series types, options, events)
+│   ├── defaults.ts                # Default values
+│   └── OptionResolver.ts          # Option resolution logic
+├── data/              # Data management (internal, not exported)
+│   ├── createDataStore.ts         # GPU buffer caching
+│   ├── packDataPoints.ts          # Zero-copy data transfer helpers
+│   ├── lttbSample.ts              # Largest-Triangle-Three-Buckets sampling
+│   ├── ohlcSample.ts              # OHLC downsampling
+│   ├── sampleSeries.ts            # Series sampling coordination
+│   └── createStreamBuffer.ts      # Streaming buffer management
+├── interaction/       # Interaction and event handling
+│   ├── createEventManager.ts      # Event system
+│   ├── createHoverState.ts        # Hover state management
+│   ├── createZoomState.ts         # Zoom/pan state
+│   ├── createInsideZoom.ts        # Inside-zoom gesture handling
+│   ├── createChartSync.ts         # Multi-chart synchronization
+│   ├── findNearestPoint.ts        # Cartesian hit testing
+│   ├── findCandlestick.ts         # Candlestick hit testing
+│   ├── findPieSlice.ts            # Pie slice hit testing
+│   └── findPointsAtX.ts           # X-coordinate point lookup
+├── components/        # UI overlay components (internal)
+│   ├── createTooltip.ts           # Tooltip display
+│   ├── formatTooltip.ts           # Tooltip formatting
+│   ├── createLegend.ts            # Series legend
+│   ├── createDataZoomSlider.ts    # Zoom slider control
+│   └── createTextOverlay.ts       # Axis labels/text rendering
+├── renderers/         # WebGPU renderers for each chart type (internal)
+│   ├── createLineRenderer.ts      # Line charts
+│   ├── createAreaRenderer.ts      # Area charts
+│   ├── createBarRenderer.ts       # Bar charts
+│   ├── createScatterRenderer.ts   # Scatter plots
+│   ├── createCandlestickRenderer.ts # Candlestick/OHLC charts
+│   ├── createPieRenderer.ts       # Pie/donut charts
+│   ├── createGridRenderer.ts      # Grid lines
+│   ├── createAxisRenderer.ts      # Axis lines
+│   ├── createCrosshairRenderer.ts # Crosshair overlay
+│   ├── createHighlightRenderer.ts # Point highlighting
+│   └── rendererUtils.ts           # WebGPU helpers (pipelines, uniforms, shaders)
+├── themes/            # Theme system
+│   ├── types.ts                   # Theme type definitions
+│   ├── darkTheme.ts               # Dark theme preset
+│   ├── lightTheme.ts              # Light theme preset
+│   └── index.ts                   # Theme exports
+├── worker/            # Worker mode support
+│   ├── index.ts                   # Worker API exports
+│   ├── createChartInWorker.ts     # Worker chart factory
+│   ├── ChartGPUWorkerProxy.ts     # Main thread proxy
+│   ├── ChartGPUWorkerController.ts # Worker thread controller
+│   ├── worker-entry.ts            # Worker entry point
+│   ├── protocol.ts                # Message protocol types
+│   └── types.ts                   # Worker-specific types
+├── utils/             # Utilities
+│   ├── scales.ts                  # Scale mapping (linear, category)
+│   ├── colors.ts                  # Color parsing and conversion
+│   ├── easing.ts                  # Animation easing functions
+│   └── checkWebGPU.ts             # WebGPU support detection
+├── shaders/           # WGSL shader files
+│   ├── line.wgsl                  # Line rendering shader
+│   ├── area.wgsl                  # Area rendering shader
+│   ├── bar.wgsl                   # Bar rendering shader
+│   ├── scatter.wgsl               # Scatter rendering shader
+│   ├── candlestick.wgsl           # Candlestick rendering shader
+│   ├── pie.wgsl                   # Pie rendering shader
+│   ├── grid.wgsl                  # Grid rendering shader
+│   ├── crosshair.wgsl             # Crosshair rendering shader
+│   └── highlight.wgsl             # Highlight rendering shader
+├── ChartGPU.ts        # Main chart API
+└── index.ts           # Public API exports
 ```
 
 ### TypeScript Configuration
@@ -128,6 +369,36 @@ src/
 - **Strict mode**: enabled
 - **Output**: `dist/` directory with declarations
 - No unused locals/parameters, implicit returns, or fallthrough cases allowed
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+**API Documentation** (`docs/api/`):
+- `README.md` - API reference overview
+- `gpu-context.md` - WebGPU context management
+- `render-scheduler.md` - Render loop and scheduling
+- `render-coordinator-summary.md` - Render coordinator overview
+- `worker.md` - Worker-based rendering API
+- `worker-protocol.md` - Worker message protocol specification
+- `animation.md` - Animation system
+- `interaction.md` - Interaction and events
+- `options.md` - Configuration options
+- `troubleshooting.md` - Common issues and solutions
+- `INTERNALS.md` - Internal module details (not exported)
+
+**User Guides** (`docs/`):
+- `GETTING_STARTED.md` - Getting started guide
+- `performance.md` - Performance optimization tips
+- `theming.md` - Theme customization guide
+- `API.md` - Public API reference
+
+**Internal Documentation** (`docs/internal/`):
+- `README.md` - Internal architecture overview
+- `WORKER_ARCHITECTURE.md` - Worker mode architecture
+- `WORKER_THREAD_INTEGRATION.md` - Worker integration notes
+- `GPU_TIMING_IMPLEMENTATION.md` - GPU timing and performance
+- `INCREMENTAL_APPEND_OPTIMIZATION.md` - Streaming data optimizations
 
 ## Coding Standards
 
@@ -146,26 +417,19 @@ src/
 - Measurable performance/ergonomics improvements
 - Decorator/metadata frameworks
 
-### Documentation Standards (from `.cursor/rules/documentation-standards.mdc`)
+### Docs-First Planning (from `.cursor/rules/docs-first-planning.mdc`)
 
-**Core principles:**
-1. **No code blocks in documentation** - link to source files instead
-2. **Link to source files** - use relative paths like `[GPUContext](src/core/GPUContext.ts)`
-3. **Essential information only** - avoid duplicating what's in source code
+**Core principle:**
+- When implementing new features, update documentation first before writing code
+- Documentation changes serve as a design review and implementation guide
+- Ensures documentation stays synchronized with code changes
 
-**Include:**
-- Function/method signatures
-- Critical parameters (only if not obvious)
-- Return types
-- Key error conditions (brief)
-- Links to source files
+### Subagent Delegation (from `.cursor/rules/subagent-delegation.mdc`)
 
-**Avoid:**
-- Code block examples (link to examples/ instead)
-- Verbose error message listings
-- Redundant descriptions
-- Long property/method lists (link to source)
-- Generic best practices
+**Core principle:**
+- Delegate complex, multi-step tasks to specialized subagents
+- Use appropriate subagents for specific domains (e.g., fullstack-developer, research-analyst)
+- Improves task quality and reduces context overhead
 
 ## WebGPU Patterns
 
@@ -189,31 +453,84 @@ Always destroy WebGPU resources to prevent leaks:
 
 ## Examples Structure
 
-Examples located in `examples/` directory. The `hello-world` example demonstrates:
-- GPUContext initialization
-- Continuous render loop with requestAnimationFrame
-- Canvas clear operations with animated colors
-- Shader compilation and error checking
-- Proper cleanup on page unload
+Examples located in `examples/` directory demonstrating various features and use cases.
+
+**Core examples:**
+- `hello-world` - Basic GPUContext initialization, render loop, shader compilation
+- `basic-line` - Simple line chart with basic configuration
+- `interactive` - Interactive charts with hover, click, and crosshair events
+- `grid-test` - Grid rendering and configuration
+
+**Chart type examples:**
+- `scatter` - Scatter plots with custom symbols and sizes
+- `pie` - Pie and donut charts
+- `grouped-bar` - Bar charts with grouped series
+- `candlestick` - Financial candlestick/OHLC charts
+- `candlestick-streaming` - Real-time streaming candlestick data
+
+**Data and performance:**
+- `data-update-animation` - Animated data updates and transitions
+- `sampling` - LTTB and OHLC downsampling demonstrations
+- `live-streaming` - Real-time streaming line data with appendData()
+- `million-points` - High-performance rendering with 1M+ data points
+
+**Worker mode examples:**
+- `worker-rendering` - Basic worker-based rendering setup
+- `worker-convenience` - Using ChartGPU.createInWorker() convenience API
+- `worker-streaming` - Real-time streaming data in worker mode
+
+**Advanced features:**
+- `chart-sync` - Synchronized crosshair across multiple charts
+
+**Acceptance tests:**
+Located in `examples/acceptance/` - Unit-style tests for core functionality (animation-controller, zoom-state, lttb-sample, data-store-append, etc.)
 
 ## Public API Exports
 
 See `src/index.ts` for complete public API surface. Key exports:
 
 **Core:**
-- Functional API: `createGPUContext`, `initializeGPUContext`, etc.
+- Functional API: `createGPUContext`, `initializeGPUContext`, `getCanvasTexture`, `clearScreen`, `destroyGPUContext`
 - Class API: `GPUContext` (backward compatibility)
+- Types: `GPUContextState`, `GPUContextOptions`, `SupportedCanvas`
+
+**Render Scheduler:**
+- Functional API: `createRenderScheduler`, `createRenderSchedulerAsync`, `startRenderScheduler`, `stopRenderScheduler`, `requestRender`, `destroyRenderScheduler`
+- Class API: `RenderScheduler` (backward compatibility)
+- Types: `RenderSchedulerState`, `RenderCallback`, `RenderCoordinatorCallbacks`
 
 **Chart:**
-- `ChartGPU.create(container, options)`
-- Types: `ChartGPUOptions`, `SeriesConfig`, `AxisConfig`, etc.
+- Main API: `ChartGPU.create(container, options)`, `ChartGPU.createInWorker(container, options)`
+- Factory function: `createChart(container, options)` (alias for createChartGPU)
+- Types: `ChartGPUInstance`, `ChartGPUOptions`, `SeriesConfig`, `AxisConfig`, `DataPoint`, `OHLCDataPoint`, `TooltipConfig`, `AnimationConfig`, etc.
+- Events: `ChartGPUEventName`, `ChartGPUEventPayload`, `ChartGPUCrosshairMovePayload`, event callback types
+
+**Worker Mode:**
+- Main thread: `ChartGPUWorkerProxy`, `createChartInWorker()`
+- Types: `WorkerConfig`, `PendingRequest`, `StrideBytes`, `ChartGPUWorkerError`, `XY_STRIDE`, `OHLC_STRIDE`
+- Protocol types: `WorkerInboundMessage`, `WorkerOutboundMessage`, `InitMessage`, `SetOptionMessage`, `AppendDataMessage`, `ResizeMessage`, `ForwardPointerEventMessage`, and many more (see protocol.ts)
 
 **Configuration:**
-- `defaultOptions`, `resolveOptions()`, `OptionResolver`
+- `defaultOptions`, `candlestickDefaults`, `resolveOptions()`, `OptionResolver`
+- Types: `ResolvedChartGPUOptions`, `ResolvedSeriesConfig`, `ResolvedLineSeriesConfig`, `ResolvedAreaSeriesConfig`, etc.
+
+**Themes:**
+- Presets: `darkTheme`, `lightTheme`, `getTheme(name)`
+- Types: `ThemeConfig`, `ThemeName`
 
 **Utilities:**
-- `createLinearScale()`, `createCategoryScale()` - pure scale utilities
+- Scales: `createLinearScale()`, `createCategoryScale()` - pure scale utilities
+- Data transfer: `packDataPoints()`, `packOHLCDataPoints()` - zero-copy transfer helpers
+- Chart sync: `connectCharts(charts)` - synchronize crosshair across charts
 
 **Internal modules not exported:**
 - `createDataStore` - GPU buffer management
-- `rendererUtils` - WebGPU rendering helpers (documented in `docs/api/INTERNALS.md`)
+- `createRenderCoordinator` - rendering orchestration
+- `rendererUtils` - WebGPU rendering helpers
+- Component creators (tooltip, legend, text overlay, etc.)
+- Renderer creators (line, area, bar, scatter, etc.)
+
+**Internal documentation:**
+- `docs/api/INTERNALS.md` - Internal module details
+- `docs/api/render-coordinator-summary.md` - Render coordinator overview
+- `docs/internal/` - Implementation notes and architecture details

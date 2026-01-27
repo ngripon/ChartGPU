@@ -8,5 +8,3 @@ declare module '*.wgsl?raw' {
   export default code;
 }
 
-// Global constant for development mode checks
-declare const __DEV__: boolean;

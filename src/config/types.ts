@@ -299,6 +299,8 @@ export interface AxisLabel {
   readonly x: number;
   /** CSS pixel y coordinate relative to canvas (for worker thread positioning). */
   readonly y: number;
+  /** Text anchor position for proper alignment. */
+  readonly anchor?: 'start' | 'middle' | 'end';
   /** Degrees, for rotated x-axis labels. */
   readonly rotation?: number;
   /** True for axis title vs tick label. */

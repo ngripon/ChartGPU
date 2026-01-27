@@ -76,6 +76,18 @@ function getCanvasCssWidth(canvas: SupportedCanvas | null, devicePixelRatio: num
   return canvas.width / devicePixelRatio;
 }
 
+/** Gets canvas CSS height - clientHeight for HTMLCanvasElement, height/DPR for OffscreenCanvas. */
+function getCanvasCssHeight(canvas: SupportedCanvas | null, devicePixelRatio: number = 1): number {
+  if (!canvas) {
+    return 0;
+  }
+  if (isHTMLCanvasElement(canvas)) {
+    return canvas.clientHeight;
+  }
+  // OffscreenCanvas: height property is in device pixels. Convert to CSS pixels by dividing by DPR.
+  return canvas.height / devicePixelRatio;
+}
+
 export interface RenderCoordinator {
   setOptions(resolvedOptions: ResolvedChartGPUOptions): void;
   /**
@@ -3486,32 +3498,34 @@ export function createRenderCoordinator(
 
     hasRenderedOnce = true;
 
-    if (overlay && overlayContainer) {
+    // Generate axis labels for DOM overlay (main thread) or callback (worker mode)
+    const shouldGenerateAxisLabels = hasCartesianSeries && (
+      (overlay && overlayContainer) ||  // DOM mode with overlay
+      (!domOverlaysEnabled && callbacks?.onAxisLabelsUpdate)  // Worker mode with callback
+    );
+
+    if (shouldGenerateAxisLabels) {
       const canvas = gpuContext.canvas;
-      // IMPORTANT: overlay positioning must be done in *CSS pixels* and in the overlayContainer's
-      // coordinate space (its padding box). Using   `canvas.width / dpr` + `getBoundingClientRect()`
-      // deltas can drift under CSS scaling/zoom and misalign with container padding/border.
-      // Note: Overlays require HTMLCanvasElement (DOM-specific positioning). OffscreenCanvas doesn't support overlays.
-      if (!canvas || !isHTMLCanvasElement(canvas)) return;
-      
-      const canvasCssWidth = canvas.clientWidth;
-      const canvasCssHeight = canvas.clientHeight;
+
+      // Get canvas dimensions (works for both HTMLCanvasElement and OffscreenCanvas)
+      const canvasCssWidth = getCanvasCssWidth(canvas, gpuContext.devicePixelRatio ?? 1);
+      const canvasCssHeight = getCanvasCssHeight(canvas, gpuContext.devicePixelRatio ?? 1);
       if (canvasCssWidth <= 0 || canvasCssHeight <= 0) return;
 
-      // Since the overlay is absolutely positioned relative to the canvas container,
-      // `offsetLeft/offsetTop` match that coordinate space.
-      const offsetX = canvas.offsetLeft;
-      const offsetY = canvas.offsetTop;
+      // Calculate offsets (only for DOM mode with HTMLCanvasElement)
+      // In worker mode (OffscreenCanvas), offsets are 0 since there's no offsetLeft/offsetTop
+      const offsetX = isHTMLCanvasElement(canvas) ? canvas.offsetLeft : 0;
+      const offsetY = isHTMLCanvasElement(canvas) ? canvas.offsetTop : 0;
 
       const plotLeftCss = clipXToCanvasCssPx(plotClipRect.left, canvasCssWidth);
       const plotRightCss = clipXToCanvasCssPx(plotClipRect.right, canvasCssWidth);
       const plotTopCss = clipYToCanvasCssPx(plotClipRect.top, canvasCssHeight);
       const plotBottomCss = clipYToCanvasCssPx(plotClipRect.bottom, canvasCssHeight);
 
-      overlay.clear();
-      if (!hasCartesianSeries) return;
+      // Clear DOM overlay if it exists
+      overlay?.clear();
 
-      // Collect axis labels for callback emission when domOverlays is false
+      // Collect axis labels for callback emission
       const collectedXLabels: AxisLabel[] = [];
       const collectedYLabels: AxisLabel[] = [];
 
@@ -3535,16 +3549,20 @@ export function createRenderCoordinator(
           xTickValues.length === 1 ? 'middle' : i === 0 ? 'start' : i === xTickValues.length - 1 ? 'end' : 'middle';
         const label = isTimeXAxis ? formatTimeTickValue(v, visibleXRangeMs) : formatTickValue(xFormatter!, v);
         if (label == null) continue;
-        const span = overlay.addLabel(label, offsetX + xCss, offsetY + xLabelY, {
-          fontSize: currentOptions.theme.fontSize,
-          color: currentOptions.theme.textColor,
-          anchor,
-        });
-        span.dir = 'auto';
-        span.style.fontFamily = currentOptions.theme.fontFamily;
 
-        // Collect for callback
-        collectedXLabels.push({ axis: 'x', text: label, x: offsetX + xCss, y: offsetY + xLabelY, isTitle: false });
+        // Add to DOM overlay if it exists
+        if (overlay) {
+          const span = overlay.addLabel(label, offsetX + xCss, offsetY + xLabelY, {
+            fontSize: currentOptions.theme.fontSize,
+            color: currentOptions.theme.textColor,
+            anchor,
+          });
+          span.dir = 'auto';
+          span.style.fontFamily = currentOptions.theme.fontFamily;
+        }
+
+        // Always collect for callback
+        collectedXLabels.push({ axis: 'x', text: label, x: offsetX + xCss, y: offsetY + xLabelY, anchor, isTitle: false });
       }
 
       const yTickCount = DEFAULT_TICK_COUNT;
@@ -3564,17 +3582,21 @@ export function createRenderCoordinator(
 
         const label = formatTickValue(yFormatter, v);
         if (label == null) continue;
-        const span = overlay.addLabel(label, offsetX + yLabelX, offsetY + yCss, {
-          fontSize: currentOptions.theme.fontSize,
-          color: currentOptions.theme.textColor,
-          anchor: 'end',
-        });
-        span.dir = 'auto';
-        span.style.fontFamily = currentOptions.theme.fontFamily;
-        ySpans.push(span);
 
-        // Collect for callback
-        collectedYLabels.push({ axis: 'y', text: label, x: offsetX + yLabelX, y: offsetY + yCss, isTitle: false });
+        // Add to DOM overlay if it exists
+        if (overlay) {
+          const span = overlay.addLabel(label, offsetX + yLabelX, offsetY + yCss, {
+            fontSize: currentOptions.theme.fontSize,
+            color: currentOptions.theme.textColor,
+            anchor: 'end',
+          });
+          span.dir = 'auto';
+          span.style.fontFamily = currentOptions.theme.fontFamily;
+          ySpans.push(span);
+        }
+
+        // Always collect for callback
+        collectedYLabels.push({ axis: 'y', text: label, x: offsetX + yLabelX, y: offsetY + yCss, anchor: 'end', isTitle: false });
       }
 
       const axisNameFontSize = Math.max(
@@ -3587,17 +3609,21 @@ export function createRenderCoordinator(
         const xCenter = (plotLeftCss + plotRightCss) / 2;
         const xTitleY =
           xLabelY + currentOptions.theme.fontSize * 0.5 + LABEL_PADDING_CSS_PX + axisNameFontSize * 0.5;
-        const span = overlay.addLabel(xAxisName, offsetX + xCenter, offsetY + xTitleY, {
-          fontSize: axisNameFontSize,
-          color: currentOptions.theme.textColor,
-          anchor: 'middle',
-        });
-        span.dir = 'auto';
-        span.style.fontFamily = currentOptions.theme.fontFamily;
-        span.style.fontWeight = '600';
 
-        // Collect for callback
-        collectedXLabels.push({ axis: 'x', text: xAxisName, x: offsetX + xCenter, y: offsetY + xTitleY, isTitle: true });
+        // Add to DOM overlay if it exists
+        if (overlay) {
+          const span = overlay.addLabel(xAxisName, offsetX + xCenter, offsetY + xTitleY, {
+            fontSize: axisNameFontSize,
+            color: currentOptions.theme.textColor,
+            anchor: 'middle',
+          });
+          span.dir = 'auto';
+          span.style.fontFamily = currentOptions.theme.fontFamily;
+          span.style.fontWeight = '600';
+        }
+
+        // Always collect for callback
+        collectedXLabels.push({ axis: 'x', text: xAxisName, x: offsetX + xCenter, y: offsetY + xTitleY, anchor: 'middle', isTitle: true });
       }
 
       const yAxisName = currentOptions.yAxis.name?.trim() ?? '';
@@ -3611,21 +3637,24 @@ export function createRenderCoordinator(
         const yTickLabelLeft = yLabelX - maxTickLabelWidth;
         const yTitleX = yTickLabelLeft - LABEL_PADDING_CSS_PX - axisNameFontSize * 0.5;
 
-        const span = overlay.addLabel(yAxisName, offsetX + yTitleX, offsetY + yCenter, {
-          fontSize: axisNameFontSize,
-          color: currentOptions.theme.textColor,
-          anchor: 'middle',
-          rotation: -90,
-        });
-        span.dir = 'auto';
-        span.style.fontFamily = currentOptions.theme.fontFamily;
-        span.style.fontWeight = '600';
+        // Add to DOM overlay if it exists
+        if (overlay) {
+          const span = overlay.addLabel(yAxisName, offsetX + yTitleX, offsetY + yCenter, {
+            fontSize: axisNameFontSize,
+            color: currentOptions.theme.textColor,
+            anchor: 'middle',
+            rotation: -90,
+          });
+          span.dir = 'auto';
+          span.style.fontFamily = currentOptions.theme.fontFamily;
+          span.style.fontWeight = '600';
+        }
 
-        // Collect for callback
-        collectedYLabels.push({ axis: 'y', text: yAxisName, x: offsetX + yTitleX, y: offsetY + yCenter, rotation: -90, isTitle: true });
+        // Always collect for callback
+        collectedYLabels.push({ axis: 'y', text: yAxisName, x: offsetX + yTitleX, y: offsetY + yCenter, anchor: 'middle', rotation: -90, isTitle: true });
       }
 
-      // Emit axis labels callback
+      // Emit axis labels callback when DOM overlays are disabled (worker mode)
       if (!domOverlaysEnabled && callbacks?.onAxisLabelsUpdate) {
         callbacks.onAxisLabelsUpdate(collectedXLabels, collectedYLabels);
       }
