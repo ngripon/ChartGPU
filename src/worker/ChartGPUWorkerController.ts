@@ -489,6 +489,17 @@ export class ChartGPUWorkerController {
         }
       );
 
+      // Subscribe to zoom range changes from coordinator and emit to main thread
+      // This ensures the zoom slider UI updates when zoom changes via wheel/programmatic means
+      coordinator.onZoomRangeChange((range) => {
+        this.emit({
+          type: 'zoomChange',
+          chartId: msg.chartId,
+          start: range.start,
+          end: range.end,
+        });
+      });
+
       // Store chart instance with shared state
       const instance: ChartInstance = {
         chartId: msg.chartId,

@@ -282,6 +282,10 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
   private pendingOverlayUpdates: PendingOverlayUpdates = {};
   private overlayUpdateRafId: number | null = null;
   
+  // Zoom echo suppression flag
+  // Set to true when processing zoom changes FROM the worker to prevent sending them back
+  private isProcessingWorkerZoomUpdate = false;
+  
   // Event forwarding to worker
   private readonly boundEventHandlers: {
     pointerdown: ((e: PointerEvent) => void) | null;
@@ -745,8 +749,14 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
       this.zoomState = createZoomState(initialStart, initialEnd);
       
       // Sync zoom state changes to worker
+      // CRITICAL: Echo suppression - only send changes to worker if they originated from UI
+      // (slider drag, programmatic setZoomRange calls), NOT from worker zoom messages
       this.zoomState.onChange((range) => {
         if (this.isDisposed) return;
+        
+        // Prevent echo: Don't send zoom changes back to worker if they came FROM the worker
+        if (this.isProcessingWorkerZoomUpdate) return;
+        
         this.setZoomRange(range.start, range.end);
       });
       
@@ -1693,13 +1703,13 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
   
   /**
    * Handles zoom change messages from worker.
-   * Updates cached zoom range and zoom state.
+   * Updates cached zoom range and zoom state with echo loop prevention.
    * 
-   * NOTE: This manages echo loop prevention. The onChange callback in createOverlays()
-   * forwards changes to the worker, but here we're receiving changes FROM the worker.
-   * By checking if values differ before calling setRange, we prevent redundant updates.
-   * ZoomState internally suppresses onChange when values are identical, providing
-   * defense-in-depth against floating point precision issues.
+   * CRITICAL: Echo suppression strategy
+   * - Sets isProcessingWorkerZoomUpdate flag before calling setRange
+   * - The onChange callback checks this flag and skips sending message back to worker
+   * - This prevents zoom changes originated in the worker from echoing back
+   * - UI-originated changes (slider drag) still propagate normally to worker
    */
   private handleZoomChangeMessage(message: import('./protocol').ZoomChangeMessage): void {
     this.cachedZoomRange = { start: message.start, end: message.end };
@@ -1708,11 +1718,18 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
     if (this.zoomState) {
       const currentRange = this.zoomState.getRange();
       
-      // Only call setRange if values actually changed (prevents redundant worker messages)
-      // setRange will trigger onChange, which sends message to worker, but worker's
-      // internal state checking prevents infinite loops
+      // Only call setRange if values actually changed (avoids no-op updates)
       if (currentRange.start !== message.start || currentRange.end !== message.end) {
-        this.zoomState.setRange(message.start, message.end);
+        // Set echo suppression flag before updating zoom state
+        // This prevents the onChange callback from sending the change back to worker
+        this.isProcessingWorkerZoomUpdate = true;
+        
+        try {
+          this.zoomState.setRange(message.start, message.end);
+        } finally {
+          // Always clear flag in finally block to ensure cleanup even on error
+          this.isProcessingWorkerZoomUpdate = false;
+        }
       }
     }
   }
