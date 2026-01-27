@@ -339,6 +339,7 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
   private legend: Legend | null = null;
   private textOverlay: TextOverlay | null = null;
   private dataZoomSlider: DataZoomSlider | null = null;
+  private dataZoomSliderHost: HTMLDivElement | null = null;
   private zoomState: ZoomState | null = null;
   
   // RAF batching for overlay updates
@@ -776,12 +777,59 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
         this.setZoomRange(range.start, range.end);
       });
       
-      this.dataZoomSlider = createDataZoomSlider(this.container, this.zoomState);
+      // Create slider host element with absolute positioning at bottom
+      // This matches the non-worker ChartGPU implementation
+      this.dataZoomSliderHost = this.createDataZoomSliderHost();
+      
+      // Create slider inside host with marginTop: 0 (host provides padding)
+      const DATA_ZOOM_SLIDER_HEIGHT_CSS_PX = 32;
+      this.dataZoomSlider = createDataZoomSlider(this.dataZoomSliderHost, this.zoomState, {
+        height: DATA_ZOOM_SLIDER_HEIGHT_CSS_PX,
+        marginTop: 0, // host provides vertical spacing
+      });
       
       // Apply theme to slider
       const themeConfig = this.resolveThemeConfig();
       this.dataZoomSlider.update(themeConfig);
     }
+  }
+  
+  /**
+   * Creates and configures the data zoom slider host element.
+   * The host is absolutely positioned at the bottom of the container.
+   * 
+   * @returns Host element for the data zoom slider
+   */
+  private createDataZoomSliderHost(): HTMLDivElement {
+    // Ensure the container has a positioning context for absolute positioning
+    // Only set if currently 'static' to avoid overwriting user styles
+    try {
+      const pos = window.getComputedStyle(this.container).position;
+      if (pos === 'static') {
+        this.container.style.position = 'relative';
+      }
+    } catch {
+      // Best effort - continue even if getComputedStyle fails
+    }
+    
+    const DATA_ZOOM_SLIDER_HEIGHT_CSS_PX = 32;
+    const DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX = 8;
+    const DATA_ZOOM_SLIDER_RESERVE_CSS_PX = DATA_ZOOM_SLIDER_HEIGHT_CSS_PX + DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX;
+    
+    const host = document.createElement('div');
+    host.style.position = 'absolute';
+    host.style.left = '0';
+    host.style.right = '0';
+    host.style.bottom = '0';
+    host.style.height = `${DATA_ZOOM_SLIDER_RESERVE_CSS_PX}px`;
+    host.style.paddingTop = `${DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX}px`;
+    host.style.boxSizing = 'border-box';
+    host.style.pointerEvents = 'auto';
+    host.style.zIndex = '10'; // Above canvas and other overlays
+    
+    this.container.appendChild(host);
+    
+    return host;
   }
   
   /**
@@ -846,6 +894,10 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
     
     this.dataZoomSlider?.dispose();
     this.dataZoomSlider = null;
+    
+    // Remove slider host from DOM
+    this.dataZoomSliderHost?.remove();
+    this.dataZoomSliderHost = null;
     
     this.zoomState = null;
   }
