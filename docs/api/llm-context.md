@@ -112,4 +112,90 @@ ChartGPU follows a **functional-first architecture**:
 - **Renderers**: Internal pipeline-based renderers for each series type
 - **Interaction**: Event-driven with render-on-demand scheduling
 
+### Architecture Diagram
+
+```mermaid
+flowchart TB
+  UserApp["Consumer app"] --> PublicAPI["src/index.ts (Public API exports)"]
+
+  PublicAPI --> ChartCreate["ChartGPU.create(container, options)"]
+  PublicAPI --> SyncAPI["connectCharts(charts)"]
+
+  subgraph ChartInstance["Chart instance (src/ChartGPU.ts)"]
+    ChartCreate --> SupportCheck["checkWebGPUSupport()"]
+    ChartCreate --> Canvas["Create canvas + mount into container"]
+    ChartCreate --> Options["resolveOptions(options)"]
+    ChartCreate --> GPUInit["GPUContext.create(canvas)"]
+    ChartCreate --> Coordinator["createRenderCoordinator(gpuContext, resolvedOptions)"]
+
+    ChartCreate --> InstanceAPI["ChartGPUInstance APIs"]
+    InstanceAPI --> RequestRender["requestAnimationFrame (coalesced)"]
+    RequestRender --> Coordinator
+
+    InstanceAPI --> SetOption["setOption(...)"]
+    InstanceAPI --> AppendData["appendData(...)"]
+    InstanceAPI --> Resize["resize()"]
+
+    subgraph PublicEvents["Public events + hit-testing (ChartGPU.ts)"]
+      Canvas --> PointerHandlers["Pointer listeners"]
+      PointerHandlers --> PublicHitTest["findNearestPoint() / findPieSlice()"]
+      PointerHandlers --> EmitEvents["emit('click'/'mouseover'/'mouseout')"]
+    end
+
+    DataZoomSlider["dataZoom slider UI (DOM)"] --> Coordinator
+  end
+
+  subgraph WebGPUCore["WebGPU core (src/core/GPUContext.ts)"]
+    GPUInit --> AdapterDevice["navigator.gpu.requestAdapter/device"]
+    GPUInit --> CanvasConfig["canvasContext.configure(format)"]
+  end
+
+  subgraph RenderCoordinatorLayer["Render coordinator (src/core/createRenderCoordinator.ts)"]
+    Coordinator --> Layout["GridArea layout"]
+    Coordinator --> Scales["xScale/yScale (clip space for render)"]
+    Coordinator --> DataUpload["createDataStore(device) (GPU buffer upload/caching)"]
+    Coordinator --> RenderPass["Encode + submit render pass"]
+
+    subgraph InternalOverlays["Internal interaction overlays (coordinator)"]
+      Coordinator --> Events["createEventManager(canvas, gridArea)"]
+      Events --> OverlayHitTest["hover/tooltip hit-testing"]
+      Events --> InteractionX["interaction-x state (crosshair)"]
+      Coordinator --> OverlaysDOM["DOM overlays: legend / tooltip / text labels"]
+    end
+  end
+
+  subgraph Renderers["GPU renderers (src/renderers/*)"]
+    RenderPass --> GridR["Grid"]
+    RenderPass --> AreaR["Area"]
+    RenderPass --> BarR["Bar"]
+    RenderPass --> ScatterR["Scatter"]
+    RenderPass --> LineR["Line"]
+    RenderPass --> PieR["Pie"]
+    RenderPass --> CandlestickR["Candlestick"]
+    RenderPass --> CrosshairR["Crosshair overlay"]
+    RenderPass --> HighlightR["Hover highlight overlay"]
+    RenderPass --> AxisR["Axes/ticks"]
+  end
+
+  subgraph Shaders["WGSL shaders (src/shaders/*)"]
+    GridR --> gridWGSL["grid.wgsl"]
+    AreaR --> areaWGSL["area.wgsl"]
+    BarR --> barWGSL["bar.wgsl"]
+    ScatterR --> scatterWGSL["scatter.wgsl"]
+    LineR --> lineWGSL["line.wgsl"]
+    PieR --> pieWGSL["pie.wgsl"]
+    CandlestickR --> candlestickWGSL["candlestick.wgsl"]
+    CrosshairR --> crosshairWGSL["crosshair.wgsl"]
+    HighlightR --> highlightWGSL["highlight.wgsl"]
+  end
+
+  subgraph ChartSync["Chart sync (src/interaction/createChartSync.ts)"]
+    SyncAPI --> ListenX["listen: 'crosshairMove'"]
+    SyncAPI --> DriveX["setCrosshairX(...) on peers"]
+  end
+
+  InteractionX --> ListenX
+  DriveX --> InstanceAPI
+```
+
 For detailed architecture notes, see [INTERNALS.md](INTERNALS.md).
