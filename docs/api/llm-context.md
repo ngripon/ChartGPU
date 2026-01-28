@@ -138,7 +138,7 @@ flowchart TB
     subgraph ChartInstance["Chart instance (src/ChartGPU.ts)"]
       ChartCreate --> SupportCheck["checkWebGPUSupport()"]
       ChartCreate --> Canvas["Create canvas + mount into container"]
-      ChartCreate --> Options["resolveOptions(options)"]
+      ChartCreate --> Options["resolveOptionsForChart(options)<br/>(adds bottom reserve when slider present)"]
       ChartCreate --> GPUInit["GPUContext.create(canvas)"]
       ChartCreate --> Coordinator["createRenderCoordinator(gpuContext, resolvedOptions)"]
 
@@ -156,7 +156,7 @@ flowchart TB
         PointerHandlers --> EmitEvents["emit('click'/'mouseover'/'mouseout')"]
       end
 
-      DataZoomSlider["dataZoom slider UI (DOM)"] --> Coordinator
+      DataZoomSlider["dataZoom slider (absolute-positioned DOM overlay)<br/>chart reserves bottom space for x-axis"] --> Coordinator
     end
 
     subgraph WebGPUCore["WebGPU core (src/core/GPUContext.ts)"]
@@ -199,10 +199,10 @@ flowchart TB
     end
 
     subgraph WorkerInbound["Main → Worker (src/worker/protocol.ts)"]
-      CanvasTransfer -->|"postMessage: init"| WorkerInit["InitMessage + OffscreenCanvas transfer"]
+      CanvasTransfer -->|"postMessage: init"| WorkerInit["InitMessage + OffscreenCanvas transfer<br/>(includes devicePixelRatio from main thread)"]
       ProxyInstance -->|"postMessage: setOption"| WorkerSetOpt["SetOptionMessage"]
       ProxyInstance -->|"postMessage: appendData"| WorkerAppend["AppendDataMessage + ArrayBuffer transfer"]
-      ResizeRAF -->|"postMessage: resize"| WorkerResize["ResizeMessage"]
+      ResizeRAF -->|"postMessage: resize"| WorkerResize["ResizeMessage<br/>(includes devicePixelRatio)"]
       ForwardPointer -->|"postMessage: forwardPointerEvent"| WorkerPointer["ForwardPointerEventMessage<br/>(includes pre-computed grid coordinates)"]
       ProxyInstance -->|"postMessage: setZoomRange"| WorkerZoom["SetZoomRangeMessage"]
       ProxyInstance -->|"postMessage: setInteractionX"| WorkerInteractionX["SetInteractionXMessage"]
@@ -211,9 +211,10 @@ flowchart TB
 
     subgraph WorkerCore["Worker Thread: ChartGPUWorkerController (src/worker/ChartGPUWorkerController.ts)"]
       WorkerInit --> WGPUInit["GPUContext.create(offscreenCanvas)"]
-      WGPUInit --> WCoordinator["createRenderCoordinator(gpuContext, options)<br/>computeInteractionScalesGridCssPx<br/>(supports OffscreenCanvas)"]
+      WGPUInit --> WOptions["resolveOptionsForChart(msg.options)<br/>(adds bottom reserve when slider present)"]
+      WOptions --> WCoordinator["createRenderCoordinator(gpuContext, resolvedOptions)<br/>computeInteractionScalesGridCssPx<br/>(supports OffscreenCanvas)"]
       WCoordinator --> WRenderLoop["MessageChannel render loop"]
-      WorkerSetOpt --> WCoordinator
+      WorkerSetOpt --> WOptions
       WorkerAppend --> WDataStore["Worker DataStore (GPU buffer upload)"]
       WorkerResize --> WCoordinator
       WorkerPointer --> WHitTest["Worker hit-testing<br/>(uses interactionScales with grid coords)<br/>findNearestPoint/findPointsAtX"]

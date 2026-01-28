@@ -19,13 +19,11 @@ The ChartGPU worker module provides a complete API for implementing GPU-accelera
 
 ### Architecture
 
-```mermaid
-graph TB
-    MainThread["Main Thread<br/>(DOM, User Events)"] -- "postMessage<br/>(init, appendData, etc.)" --> Worker["Web Worker<br/>(ChartGPUWorkerController)"]
-    Worker -- "postMessage<br/>(tooltipUpdate, click, etc.)" --> MainThread
-    Worker --> GPU["WebGPU<br/>(OffscreenCanvas Rendering)"]
-    MainThread --> DOM["DOM Overlays<br/>(Tooltips, Legend, Axis Labels)"]
-```
+Worker mode splits responsibilities between threads:
+- The **main thread** owns DOM (tooltip/legend/axis labels/dataZoom slider) and forwards input + sizing to the worker.
+- The **worker thread** owns WebGPU rendering + hit testing using the transferred `OffscreenCanvas`.
+
+For a full end-to-end diagram, see the architecture flowchart in [llm-context.md](llm-context.md#architecture-diagram) and the deeper [Worker Architecture](../internal/WORKER_ARCHITECTURE.md).
 
 ## Public API (Recommended)
 
@@ -176,15 +174,7 @@ In development builds, ChartGPU emits helpful warnings:
 
 ### Typed Array API
 
-```typescript
-// Pre-packed Float32Array (zero-copy)
-const packed = new Float32Array([0, 1, 1, 3, 2, 2]); // [x0,y0,x1,y1,...]
-chart.appendData(0, packed, 'xy');
-// Note: packed is now detached and unusable
-
-// Keep the original array
-chart.appendData(0, packed.slice(), 'xy');
-```
+For typed-array usage patterns (including zero-copy transfers and buffer detachment), see [`ChartGPUWorkerProxy.ts`](../../src/worker/ChartGPUWorkerProxy.ts) and the working examples in [`examples/worker-streaming/main.ts`](../../examples/worker-streaming/main.ts) and [`examples/worker-rendering/main.ts`](../../examples/worker-rendering/main.ts).
 
 ### Helper Functions
 
@@ -312,16 +302,12 @@ Worker-based charts support full interaction capabilities including tooltips, ho
 
 ### OffscreenCanvas Coordinate Handling
 
+Worker-mode layout depends on the main thread providing an up-to-date device pixel ratio (DPR) to the worker. If you implement the worker protocol directly, ensure you send `devicePixelRatio` with initialization and keep it current as the page DPR changes (otherwise CSS-pixel layout such as axis labels/titles and overlays can drift). See protocol types in [`protocol.ts`](../../src/worker/protocol.ts) and DPR monitoring in [`ChartGPUWorkerProxy.ts`](../../src/worker/ChartGPUWorkerProxy.ts).
+
 **Problem:** OffscreenCanvas dimensions are in device pixels, but tooltip coordinates must be in CSS pixels (matching DOM coordinate system).
 
 **Solution implemented in `getPlotSizeCssPx()`:**
-
-```typescript
-// OffscreenCanvas: canvas.width/height are in device pixels
-// Convert to CSS pixels by dividing by device pixel ratio
-const cssWidth = canvas.width / devicePixelRatio;
-const cssHeight = canvas.height / devicePixelRatio;
-```
+OffscreenCanvas uses device-pixel dimensions; ChartGPU converts to CSS pixels by dividing by the current DPR so layout matches DOM coordinate systems.
 
 **Key insight:** Dividing device pixels by DPR converts to CSS pixels, which match the DOM coordinate system used by pointer events.
 
@@ -363,50 +349,18 @@ const cssHeight = canvas.height / devicePixelRatio;
 ### Event Forwarding Best Practices
 
 **1. Wait for initialization:**
-```typescript
-if (!this.isInitialized) {
-  return; // Drop events until worker is ready
-}
-```
+Drop or defer events until the worker has sent `ready` (the proxy tracks an initialized/ready state).
 
 **2. RAF-throttle pointermove events:**
-```typescript
-// Prevents message queue overflow on rapid mouse movement
-this.pendingMoveEvent = event;
-if (!this.moveThrottleRafId) {
-  this.moveThrottleRafId = requestAnimationFrame(() => {
-    if (this.pendingMoveEvent) {
-      this.forwardEventToWorker(this.pendingMoveEvent);
-      this.pendingMoveEvent = null;
-    }
-    this.moveThrottleRafId = null;
-  });
-}
-```
+Throttle high-rate pointermove forwarding to avoid flooding the worker message queue.
 
 **3. Compute grid coordinates on main thread:**
-```typescript
-const eventData = this.computePointerEventData(event);
-worker.postMessage({ type: 'forwardPointerEvent', chartId, event: eventData });
-```
+Compute `PointerEventData` on the main thread (including grid-local coordinates) and forward it via `forwardPointerEvent`.
 
 **4. RAF-batch tooltip rendering:**
-```typescript
-// Prevents layout thrashing from rapid tooltip updates
-if (!this.tooltipUpdateRafId) {
-  this.tooltipUpdateRafId = requestAnimationFrame(() => {
-    if (this.pendingTooltipUpdate) {
-      this.tooltip.show(
-        this.pendingTooltipUpdate.x,
-        this.pendingTooltipUpdate.y,
-        this.pendingTooltipUpdate.content
-      );
-      this.pendingTooltipUpdate = null;
-    }
-    this.tooltipUpdateRafId = null;
-  });
-}
-```
+Batch DOM tooltip updates on animation frames to avoid layout thrash during rapid hover updates.
+
+**Source:** [`ChartGPUWorkerProxy.ts`](../../src/worker/ChartGPUWorkerProxy.ts)
 
 ### Debugging Interaction Issues
 
@@ -473,6 +427,7 @@ Main-thread proxy class implementing `ChartGPUInstance` interface. Returned by `
 - **Message Correlation:** Unique message IDs track request/response pairs with 30s timeout
 - **Event System:** Re-emits worker events (`click`, `mouseover`, `mouseout`, `crosshairMove`) to registered listeners
 - **DOM Overlays:** Manages tooltip, legend, axis labels, and data zoom slider in main thread
+- **Layout (dataZoom slider):** when `dataZoom` includes a slider (`{ type: 'slider' }`), ChartGPU reserves additional bottom plot space so x-axis tick labels remain visible and the x-axis title is centered within the remaining space above the slider track (instead of being obscured by the overlay). This is especially important in worker mode where the main thread renders overlays while the worker renders the chart. See [`OptionResolver.ts`](../../src/config/OptionResolver.ts) and the x-axis/overlay layout logic in [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts) (see also [Data Zoom Configuration](options.md#data-zoom-configuration)).
 - **Auto Resize:** Monitors container size and device pixel ratio changes, auto-resizes canvas
 - **Event Forwarding:** Captures pointer and wheel events, forwards to worker for interaction handling
 - **Performance Metrics:** Receives performance metrics from worker thread and caches them locally; forwards performance update events to subscribers
@@ -494,21 +449,9 @@ Returns performance capabilities that were sent by the worker during initializat
 Subscribes to performance updates from the worker thread. The worker sends `performanceUpdate` messages on every render frame (up to 60fps), and the proxy re-emits these as events to registered callbacks.
 
 **Performance Message Flow:**
-
-```mermaid
-sequenceDiagram
-    participant Main as Main Thread (Proxy)
-    participant Worker as Worker Thread
-    
-    Note over Main,Worker: Initialization
-    Worker-->>Main: ready (with capabilities)
-    Main->>Main: Cache capabilities
-    
-    Note over Main,Worker: Runtime Updates
-    Worker-->>Main: performanceUpdate (every frame)
-    Main->>Main: Cache latest metrics
-    Main->>Main: Emit to subscribers
-```
+Worker mode performance updates are streamed from the worker to the proxy:
+- On init, the worker sends `ready` with `PerformanceCapabilities` (cached by the proxy).
+- During rendering, the worker sends `performanceUpdate` messages (cached and re-emitted by the proxy).
 
 **Implementation notes:**
 - Performance metrics are tracked in the worker thread by RenderScheduler
@@ -584,56 +527,12 @@ For standard use cases, prefer the [high-level factory function](#createchartinw
 ### Worker Setup
 
 **Worker entry point** (`worker.ts`):
-
-```typescript
-import { ChartGPUWorkerController } from 'chartgpu/worker';
-
-const controller = new ChartGPUWorkerController();
-
-controller.onMessage((msg) => {
-  self.postMessage(msg);
-});
-
-self.onmessage = async (event) => {
-  await controller.handleMessage(event.data);
-};
-```
+Create a [`ChartGPUWorkerController`](../../src/worker/ChartGPUWorkerController.ts), forward its outbound messages to the main thread, and pass inbound messages to `handleMessage(...)`. For a concrete implementation, see [`worker-entry.ts`](../../src/worker/worker-entry.ts) and the [Worker Thread Integration](../internal/WORKER_THREAD_INTEGRATION.md) guide.
 
 ### Main Thread Setup
 
 **Main thread** (`main.ts`):
-
-```typescript
-import type { WorkerInboundMessage, WorkerOutboundMessage } from 'chartgpu/worker';
-
-const worker = new Worker(new URL('./worker.ts', import.meta.url));
-const canvas = document.querySelector('canvas');
-const offscreen = canvas.transferControlToOffscreen();
-
-// Send init message
-const initMsg: WorkerInboundMessage = {
-  type: 'init',
-  chartId: 'chart-1',
-  messageId: crypto.randomUUID(),
-  canvas: offscreen,
-  devicePixelRatio: window.devicePixelRatio,
-  options: {
-    series: [{ type: 'line', data: [[0, 1], [1, 2]] }]
-  }
-};
-
-worker.postMessage(initMsg, [offscreen]);
-
-// Handle worker responses
-worker.onmessage = (event) => {
-  const msg: WorkerOutboundMessage = event.data;
-  if (msg.type === 'ready') {
-    console.log('Chart initialized');
-  } else if (msg.type === 'tooltipUpdate') {
-    // Render tooltip in DOM
-  }
-};
-```
+Create a `Worker`, transfer an `OffscreenCanvas`, and send an [`InitMessage`](../../src/worker/protocol.ts) including the current `devicePixelRatio`. Then handle outbound messages to render DOM overlays (tooltip/legend/axis labels/slider) and re-emit chart events. For a working reference, see [`examples/worker-rendering/main.ts`](../../examples/worker-rendering/main.ts) and [`examples/worker-convenience/main.ts`](../../examples/worker-convenience/main.ts).
 
 **Source:** See complete implementation guide in [Worker Thread Integration](../internal/WORKER_THREAD_INTEGRATION.md)
 
@@ -697,31 +596,12 @@ Disposes all chart instances and cleans up controller resources.
 
 ### Lifecycle
 
-```mermaid
-sequenceDiagram
-    participant Main as Main Thread
-    participant Controller as ChartGPUWorkerController
-    participant GPU as WebGPU Context
-    
-    Note over Main,Controller: Initialization
-    Main->>Controller: new ChartGPUWorkerController()
-    Controller->>Controller: onMessage(handler)
-    Main->>Controller: handleMessage({ type: 'init' })
-    Controller->>GPU: Initialize WebGPU + RenderCoordinator
-    Controller->>Main: { type: 'ready' }
-    
-    Note over Main,Controller: Operation
-    Main->>Controller: handleMessage({ type: 'appendData' })
-    GPU->>GPU: Update buffers + render
-    Controller->>Main: { type: 'tooltipUpdate' }
-    
-    Note over Main,Controller: Cleanup
-    Main->>Controller: handleMessage({ type: 'dispose' })
-    Controller->>GPU: Destroy resources
-    Controller->>Main: { type: 'disposed' }
-    Main->>Controller: dispose()
-    Controller->>Controller: Clear all state
-```
+At a high level:
+- **Initialization**: main thread sends `init` and waits for `ready`.
+- **Operation**: main thread sends updates (`setOption`, `appendData`, `resize`, `forwardPointerEvent`, etc.) and receives outbound messages (`rendered`, `tooltipUpdate`, `axisLabelsUpdate`, events, and more).
+- **Cleanup**: main thread sends `dispose` (and/or calls controller `dispose()` when shutting down the worker) and waits for `disposed`.
+
+See the message types in [`protocol.ts`](../../src/worker/protocol.ts) and the controller implementation in [`ChartGPUWorkerController.ts`](../../src/worker/ChartGPUWorkerController.ts).
 
 ## Protocol Types
 
@@ -888,15 +768,7 @@ A single worker controller can manage multiple chart instances:
 - Independent render loops per chart
 
 **Usage:**
-```typescript
-// Main thread creates multiple charts in same worker
-worker.postMessage({ type: 'init', chartId: 'chart-1', ... });
-worker.postMessage({ type: 'init', chartId: 'chart-2', ... });
-
-// Updates are routed by chartId
-worker.postMessage({ type: 'appendData', chartId: 'chart-1', ... });
-worker.postMessage({ type: 'appendData', chartId: 'chart-2', ... });
-```
+Use a distinct `chartId` per chart instance; all messages include `chartId` and the controller routes them accordingly. See the inbound/outbound message definitions in [`protocol.ts`](../../src/worker/protocol.ts) and routing in [`ChartGPUWorkerController.ts`](../../src/worker/ChartGPUWorkerController.ts).
 
 **Note:** Multiple charts share worker thread CPU time. For optimal performance, limit to 2-4 charts per worker.
 

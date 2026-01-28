@@ -483,6 +483,8 @@ export interface AnimationConfig {
 
 Zoom is enabled when `dataZoom` contains an entry of `type: 'inside'` and/or `type: 'slider'`. A single shared percent-space window `{ start, end }` in `[0, 100]` is used.
 
+When `type: 'slider'` is enabled, ChartGPU reserves **40 CSS px** of additional bottom plot space so x-axis labels/titles render above the slider overlay (see [`OptionResolver.ts`](../src/config/OptionResolver.ts)).
+
 Defaults when omitted:
 
 - **`start`**: `0`

@@ -3634,8 +3634,17 @@ export function createRenderCoordinator(
       const xAxisName = currentOptions.xAxis.name?.trim() ?? '';
       if (xAxisName.length > 0) {
         const xCenter = (plotLeftCss + plotRightCss) / 2;
-        const xTitleY =
-          xLabelY + currentOptions.theme.fontSize * 0.5 + LABEL_PADDING_CSS_PX + axisNameFontSize * 0.5;
+        // Center title vertically between the tick labels and the zoom slider (when present).
+        // The zoom slider is an absolute-positioned overlay at the bottom of the canvas. We reserve
+        // additional `grid.bottom` space so tick labels stay visible above it.
+        //
+        // xLabelY is the vertical center of the tick labels; add half font size to approximate the
+        // tick-label "bottom edge" and then center the axis title within the remaining space.
+        const xTickLabelsBottom = xLabelY + currentOptions.theme.fontSize * 0.5;
+        const hasSliderZoom = currentOptions.dataZoom?.some((z) => z?.type === 'slider') ?? false;
+        const sliderTrackHeightCssPx = 32; // Keep in sync with ChartGPU/createDataZoomSlider defaults.
+        const bottomLimitCss = hasSliderZoom ? canvasCssHeight - sliderTrackHeightCssPx : canvasCssHeight;
+        const xTitleY = (xTickLabelsBottom + bottomLimitCss) / 2;
 
         // Collect label data for callback (worker mode)
         const axisLabel: AxisLabel = { axis: 'x', text: xAxisName, x: offsetX + xCenter, y: offsetY + xTitleY, anchor: 'middle', isTitle: true };
