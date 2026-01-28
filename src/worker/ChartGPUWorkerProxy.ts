@@ -340,13 +340,13 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
     canvas.style.width = '100%';
     canvas.style.height = '100%';
     this.container.appendChild(canvas);
-    
+
     // Get canvas dimensions
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
-    
+
     canvas.width = width;
     canvas.height = height;
     
@@ -666,11 +666,11 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
           
           const { width, height } = this.pendingResize;
           this.pendingResize = null;
-          
+
           // Send resize message to worker with CSS pixels
           // WorkerController will multiply by devicePixelRatio to get physical pixels
           const dpr = this.currentDpr;
-          
+
           this.sendMessage({
             type: 'resize',
             chartId: this.chartId,
@@ -722,17 +722,15 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
       // Trigger resize with new DPR
       const canvas = this.container.querySelector('canvas');
       if (!canvas) return;
-      
+
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
-      const physicalWidth = Math.max(1, Math.round(width * this.currentDpr));
-      const physicalHeight = Math.max(1, Math.round(height * this.currentDpr));
-      
+
       this.sendMessage({
         type: 'resize',
         chartId: this.chartId,
-        width: physicalWidth,
-        height: physicalHeight,
+        width: Math.max(1, width),   // CSS pixels
+        height: Math.max(1, height), // CSS pixels
         devicePixelRatio: this.currentDpr,
         requestRender: true,
       });
@@ -1251,12 +1249,12 @@ export class ChartGPUWorkerProxy implements ChartGPUInstance {
       console.warn('ChartGPUWorkerProxy.resize(): Canvas not found in container');
       return;
     }
-    
+
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.round(rect.width * dpr));
-    const height = Math.max(1, Math.round(rect.height * dpr));
-    
+    const width = Math.max(1, rect.width);   // CSS pixels
+    const height = Math.max(1, rect.height); // CSS pixels
+
     this.sendMessage({
       type: 'resize',
       chartId: this.chartId,

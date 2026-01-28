@@ -123,13 +123,12 @@ const resolveRadiiCss = (
 const computePlotScissorDevicePx = (
   gridArea: GridArea
 ): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const { canvasWidth, canvasHeight } = gridArea;
+  const { canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeftDevice = gridArea.left * dpr;
-  const plotRightDevice = canvasWidth - gridArea.right * dpr;
-  const plotTopDevice = gridArea.top * dpr;
-  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+  const plotLeftDevice = gridArea.left * devicePixelRatio;
+  const plotRightDevice = canvasWidth - gridArea.right * devicePixelRatio;
+  const plotTopDevice = gridArea.top * devicePixelRatio;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * devicePixelRatio;
 
   const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
   const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
@@ -237,7 +236,7 @@ export function createPieRenderer(device: GPUDevice, options?: PieRendererOption
   const prepare: PieRenderer['prepare'] = (seriesConfig, gridArea) => {
     assertNotDisposed();
 
-    const dprRaw = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+    const dprRaw = gridArea.devicePixelRatio;
     const dpr = dprRaw > 0 && Number.isFinite(dprRaw) ? dprRaw : 1;
 
     lastCanvasWidth = gridArea.canvasWidth;

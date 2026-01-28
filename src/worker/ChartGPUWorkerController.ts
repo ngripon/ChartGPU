@@ -773,12 +773,6 @@ export class ChartGPUWorkerController {
       const targetWidth = Math.floor(width * devicePixelRatio);
       const targetHeight = Math.floor(height * devicePixelRatio);
 
-      console.warn('[WorkerController] handleResize:', JSON.stringify({
-        messageDimensions: { width, height, devicePixelRatio },
-        targetDimensions: { targetWidth, targetHeight },
-        currentCanvas: { width: instance.canvas.width, height: instance.canvas.height }
-      }));
-
       // Validate that dimensions are non-zero after scaling
       if (targetWidth === 0 || targetHeight === 0) {
         throw new Error(

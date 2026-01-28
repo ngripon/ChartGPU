@@ -67,7 +67,7 @@ const getOHLC = (
 };
 
 const computePlotSizeCssPx = (gridArea: GridArea): { readonly plotWidthCss: number; readonly plotHeightCss: number } | null => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const dpr = gridArea.devicePixelRatio;
   if (!(dpr > 0)) return null;
   const canvasCssWidth = gridArea.canvasWidth / dpr;
   const canvasCssHeight = gridArea.canvasHeight / dpr;
@@ -80,13 +80,12 @@ const computePlotSizeCssPx = (gridArea: GridArea): { readonly plotWidthCss: numb
 const computePlotClipRect = (
   gridArea: GridArea
 ): { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number; readonly width: number; readonly height: number } => {
-  const { left, right, top, bottom, canvasWidth, canvasHeight } = gridArea;
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const { left, right, top, bottom, canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeft = left * dpr;
-  const plotRight = canvasWidth - right * dpr;
-  const plotTop = top * dpr;
-  const plotBottom = canvasHeight - bottom * dpr;
+  const plotLeft = left * devicePixelRatio;
+  const plotRight = canvasWidth - right * devicePixelRatio;
+  const plotTop = top * devicePixelRatio;
+  const plotBottom = canvasHeight - bottom * devicePixelRatio;
 
   const plotLeftClip = (plotLeft / canvasWidth) * 2.0 - 1.0;
   const plotRightClip = (plotRight / canvasWidth) * 2.0 - 1.0;
@@ -106,13 +105,12 @@ const computePlotClipRect = (
 const computePlotScissorDevicePx = (
   gridArea: GridArea
 ): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const { canvasWidth, canvasHeight } = gridArea;
+  const { canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeftDevice = gridArea.left * dpr;
-  const plotRightDevice = canvasWidth - gridArea.right * dpr;
-  const plotTopDevice = gridArea.top * dpr;
-  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+  const plotLeftDevice = gridArea.left * devicePixelRatio;
+  const plotRightDevice = canvasWidth - gridArea.right * devicePixelRatio;
+  const plotTopDevice = gridArea.top * devicePixelRatio;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * devicePixelRatio;
 
   const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
   const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));

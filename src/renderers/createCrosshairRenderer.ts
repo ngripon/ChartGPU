@@ -158,13 +158,12 @@ const generateCrosshairVertices = (
     throw new Error('CrosshairRenderer.prepare: gridArea margins must be non-negative.');
   }
 
-  const { canvasWidth, canvasHeight } = gridArea;
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const { canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeftDevice = gridArea.left * dpr;
-  const plotRightDevice = canvasWidth - gridArea.right * dpr;
-  const plotTopDevice = gridArea.top * dpr;
-  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+  const plotLeftDevice = gridArea.left * devicePixelRatio;
+  const plotRightDevice = canvasWidth - gridArea.right * devicePixelRatio;
+  const plotTopDevice = gridArea.top * devicePixelRatio;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * devicePixelRatio;
 
   const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
   const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
@@ -174,10 +173,10 @@ const generateCrosshairVertices = (
   const scissorH = Math.max(0, scissorB - scissorY);
 
   // Convert the requested position from CSS px (canvas-local) to device px.
-  const xDevice = xCssPx * dpr;
-  const yDevice = yCssPx * dpr;
+  const xDevice = xCssPx * devicePixelRatio;
+  const yDevice = yCssPx * devicePixelRatio;
 
-  const thicknessOffsets = computeThicknessOffsetsDevicePx(options.lineWidth, dpr);
+  const thicknessOffsets = computeThicknessOffsetsDevicePx(options.lineWidth, devicePixelRatio);
   if (thicknessOffsets.length === 0 || (!options.showX && !options.showY)) {
     return {
       vertices: new Float32Array(0),

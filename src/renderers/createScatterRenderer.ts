@@ -137,13 +137,12 @@ const writeTransformMat4F32 = (out: Float32Array, ax: number, bx: number, ay: nu
 const computePlotScissorDevicePx = (
   gridArea: GridArea
 ): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const { canvasWidth, canvasHeight } = gridArea;
+  const { canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeftDevice = gridArea.left * dpr;
-  const plotRightDevice = canvasWidth - gridArea.right * dpr;
-  const plotTopDevice = gridArea.top * dpr;
-  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+  const plotLeftDevice = gridArea.left * devicePixelRatio;
+  const plotRightDevice = canvasWidth - gridArea.right * devicePixelRatio;
+  const plotTopDevice = gridArea.top * devicePixelRatio;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * devicePixelRatio;
 
   const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
   const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
@@ -281,7 +280,7 @@ export function createScatterRenderer(device: GPUDevice, options?: ScatterRender
     fsUniformScratchF32[3] = clamp01(a);
     writeUniformBuffer(device, fsUniformBuffer, fsUniformScratchF32);
 
-    const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+    const dpr = gridArea?.devicePixelRatio ?? 1;
     const hasValidDpr = dpr > 0 && Number.isFinite(dpr);
 
     const seriesSymbolSize = seriesConfig.symbolSize;

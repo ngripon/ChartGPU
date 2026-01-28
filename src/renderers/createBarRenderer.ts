@@ -80,7 +80,7 @@ const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } =>
 };
 
 const computePlotSizeCssPx = (gridArea: GridArea): { readonly plotWidthCss: number; readonly plotHeightCss: number } | null => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const dpr = gridArea.devicePixelRatio;
   if (!(dpr > 0)) return null;
   const canvasCssWidth = gridArea.canvasWidth / dpr;
   const canvasCssHeight = gridArea.canvasHeight / dpr;
@@ -93,13 +93,12 @@ const computePlotSizeCssPx = (gridArea: GridArea): { readonly plotWidthCss: numb
 const computePlotClipRect = (
   gridArea: GridArea
 ): { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number } => {
-  const { left, right, top, bottom, canvasWidth, canvasHeight } = gridArea;
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const { left, right, top, bottom, canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeft = left * dpr;
-  const plotRight = canvasWidth - right * dpr;
-  const plotTop = top * dpr;
-  const plotBottom = canvasHeight - bottom * dpr;
+  const plotLeft = left * devicePixelRatio;
+  const plotRight = canvasWidth - right * devicePixelRatio;
+  const plotTop = top * devicePixelRatio;
+  const plotBottom = canvasHeight - bottom * devicePixelRatio;
 
   const plotLeftClip = (plotLeft / canvasWidth) * 2.0 - 1.0;
   const plotRightClip = (plotRight / canvasWidth) * 2.0 - 1.0;

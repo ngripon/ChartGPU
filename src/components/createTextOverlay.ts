@@ -58,6 +58,7 @@ export function createTextOverlay(container: HTMLElement): TextOverlay {
   overlay.style.inset = '0';
   overlay.style.pointerEvents = 'none';
   overlay.style.overflow = 'visible';
+  overlay.style.zIndex = '10'; // Above zoom slider (z-index: 4) and other overlays
   container.appendChild(overlay);
 
   let disposed = false;

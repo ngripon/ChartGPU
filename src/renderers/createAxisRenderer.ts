@@ -52,7 +52,8 @@ const isFiniteGridArea = (gridArea: GridArea): boolean =>
   Number.isFinite(gridArea.top) &&
   Number.isFinite(gridArea.bottom) &&
   Number.isFinite(gridArea.canvasWidth) &&
-  Number.isFinite(gridArea.canvasHeight);
+  Number.isFinite(gridArea.canvasHeight) &&
+  Number.isFinite(gridArea.devicePixelRatio);
 
 const finiteOrUndefined = (v: number | undefined): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
@@ -83,7 +84,7 @@ const generateAxisVertices = (
   gridArea: GridArea,
   tickCountOverride?: number
 ): Float32Array => {
-  const { left, right, top, bottom, canvasWidth, canvasHeight } = gridArea;
+  const { left, right, top, bottom, canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
   if (!isFiniteGridArea(gridArea)) {
     throw new Error('AxisRenderer.prepare: gridArea dimensions must be finite numbers.');
@@ -92,11 +93,10 @@ const generateAxisVertices = (
     throw new Error('AxisRenderer.prepare: canvas dimensions must be positive.');
   }
 
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const plotLeft = left * dpr;
-  const plotRight = canvasWidth - right * dpr;
-  const plotTop = top * dpr;
-  const plotBottom = canvasHeight - bottom * dpr;
+  const plotLeft = left * devicePixelRatio;
+  const plotRight = canvasWidth - right * devicePixelRatio;
+  const plotTop = top * devicePixelRatio;
+  const plotBottom = canvasHeight - bottom * devicePixelRatio;
 
   const plotLeftClip = (plotLeft / canvasWidth) * 2.0 - 1.0;
   const plotRightClip = (plotRight / canvasWidth) * 2.0 - 1.0;
@@ -113,7 +113,7 @@ const generateAxisVertices = (
   if (!Number.isFinite(tickCountRaw) || tickCount < 1) {
     throw new Error('AxisRenderer.prepare: tickCount must be a finite number >= 1.');
   }
-  const tickLengthDevicePx = tickLengthCssPx * dpr;
+  const tickLengthDevicePx = tickLengthCssPx * devicePixelRatio;
   const tickDeltaClipX = (tickLengthDevicePx / canvasWidth) * 2.0;
   const tickDeltaClipY = (tickLengthDevicePx / canvasHeight) * 2.0;
 

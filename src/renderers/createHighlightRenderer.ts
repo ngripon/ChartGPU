@@ -7,6 +7,9 @@ export type HighlightPoint = Readonly<{
   centerDeviceX: number;
   centerDeviceY: number;
 
+  /** Device pixel ratio used for CSS→device conversion (worker-safe). */
+  devicePixelRatio: number;
+
   /** Canvas dimensions in *device pixels* (used to reset scissor). */
   canvasWidth: number;
   canvasHeight: number;
@@ -21,7 +24,7 @@ export interface HighlightRenderer {
    *
    * Coordinate contract:
    * - `point.centerDeviceX/Y` are device pixels in the same space as fragment `@builtin(position)`.
-   * - `size` is specified in CSS pixels; the renderer will scale it by DPR.
+   * - `size` is specified in CSS pixels; the renderer will scale it by `point.devicePixelRatio`.
    */
   prepare(point: HighlightPoint, color: string, size: number): void;
   render(passEncoder: GPURenderPassEncoder): void;
@@ -118,7 +121,8 @@ export function createHighlightRenderer(device: GPUDevice, options?: HighlightRe
       throw new Error('HighlightRenderer.prepare: size must be a finite non-negative number.');
     }
 
-    const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+    const dprRaw = point.devicePixelRatio;
+    const dpr = Number.isFinite(dprRaw) && dprRaw > 0 ? dprRaw : 1;
     const baseRadiusDevicePx = sizeCssPx * dpr;
 
     // Slightly larger than the implied "normal" point size.

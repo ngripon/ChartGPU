@@ -20,8 +20,9 @@ export interface GridArea {
   readonly right: number;       // Right margin in CSS pixels
   readonly top: number;         // Top margin in CSS pixels
   readonly bottom: number;      // Bottom margin in CSS pixels
-  readonly canvasWidth: number;  // Canvas width in device pixels
-  readonly canvasHeight: number; // Canvas height in device pixels
+  readonly canvasWidth: number;  // Canvas width in device pixels (canvas.width)
+  readonly canvasHeight: number; // Canvas height in device pixels (canvas.height)
+  readonly devicePixelRatio: number; // Device pixel ratio for CSS-to-device conversion
 }
 
 export interface GridLineCount {
@@ -68,15 +69,13 @@ const createIdentityMat4Buffer = (): ArrayBuffer => {
 };
 
 const generateGridVertices = (gridArea: GridArea, horizontal: number, vertical: number): Float32Array => {
-  const { left, right, top, bottom, canvasWidth, canvasHeight } = gridArea;
+  const { left, right, top, bottom, canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  // Get device pixel ratio (assumed to be encoded in canvasWidth/canvasHeight)
-  // Calculate plot area in device pixels
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const plotLeft = left * dpr;
-  const plotRight = canvasWidth - right * dpr;
-  const plotTop = top * dpr;
-  const plotBottom = canvasHeight - bottom * dpr;
+  // Calculate plot area in device pixels using explicit DPR
+  const plotLeft = left * devicePixelRatio;
+  const plotRight = canvasWidth - right * devicePixelRatio;
+  const plotTop = top * devicePixelRatio;
+  const plotBottom = canvasHeight - bottom * devicePixelRatio;
 
   const plotWidth = plotRight - plotLeft;
   const plotHeight = plotBottom - plotTop;

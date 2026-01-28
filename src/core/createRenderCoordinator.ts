@@ -463,13 +463,23 @@ const computeGridArea = (gpuContext: GPUContextLike, options: ResolvedChartGPUOp
   const canvas = gpuContext.canvas;
   if (!canvas) throw new Error('RenderCoordinator: gpuContext.canvas is required.');
 
+  // GridArea uses:
+  // - Margins (left, right, top, bottom) in CSS pixels
+  // - Canvas dimensions (canvasWidth, canvasHeight) in DEVICE pixels
+  // - devicePixelRatio for CSS-to-device conversion (worker-compatible)
+  // This allows renderers to multiply margins by DPR and subtract from canvas dimensions
+
+  const dpr = gpuContext.devicePixelRatio ?? 1;
+  const devicePixelRatio = (Number.isFinite(dpr) && dpr > 0) ? dpr : 1;
+
   return {
     left: options.grid.left,
     right: options.grid.right,
     top: options.grid.top,
     bottom: options.grid.bottom,
-    canvasWidth: canvas.width,
-    canvasHeight: canvas.height,
+    canvasWidth: canvas.width,      // Device pixels
+    canvasHeight: canvas.height,    // Device pixels
+    devicePixelRatio,               // Explicit DPR for worker compatibility
   };
 };
 
@@ -488,16 +498,36 @@ const withAlpha = (cssColor: string, alphaMultiplier: number): string => {
   return rgba01ToCssRgba([parsed[0], parsed[1], parsed[2], a]);
 };
 
+/**
+ * Estimates the maximum width of Y-axis tick labels in CSS pixels.
+ * Used in worker mode where DOM measurement is not available.
+ *
+ * Uses a heuristic: ~0.6 * fontSize per character for typical numeric labels.
+ * This is conservative and should prevent overlap in most cases.
+ */
+const estimateMaxYTickLabelWidth = (
+  yLabels: ReadonlyArray<{ readonly text: string }>,
+  fontSize: number
+): number => {
+  if (yLabels.length === 0) return 0;
+
+  // Find the longest label text
+  const maxChars = yLabels.reduce((max, label) => Math.max(max, label.text.length), 0);
+
+  // Estimate width: ~0.6 * fontSize per character for typical monospace-ish numeric text
+  // This is conservative to prevent overlap
+  return Math.ceil(maxChars * fontSize * 0.6);
+};
+
 const computePlotClipRect = (
   gridArea: GridArea
 ): { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number } => {
-  const { left, right, top, bottom, canvasWidth, canvasHeight } = gridArea;
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+  const { left, right, top, bottom, canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeft = left * dpr;
-  const plotRight = canvasWidth - right * dpr;
-  const plotTop = top * dpr;
-  const plotBottom = canvasHeight - bottom * dpr;
+  const plotLeft = left * devicePixelRatio;
+  const plotRight = canvasWidth - right * devicePixelRatio;
+  const plotTop = top * devicePixelRatio;
+  const plotBottom = canvasHeight - bottom * devicePixelRatio;
 
   const plotLeftClip = (plotLeft / canvasWidth) * 2.0 - 1.0;
   const plotRightClip = (plotRight / canvasWidth) * 2.0 - 1.0;
@@ -528,13 +558,12 @@ const lerpDomain = (
 const computePlotScissorDevicePx = (
   gridArea: GridArea
 ): { readonly x: number; readonly y: number; readonly w: number; readonly h: number } => {
-  const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
-  const { canvasWidth, canvasHeight } = gridArea;
+  const { canvasWidth, canvasHeight, devicePixelRatio } = gridArea;
 
-  const plotLeftDevice = gridArea.left * dpr;
-  const plotRightDevice = canvasWidth - gridArea.right * dpr;
-  const plotTopDevice = gridArea.top * dpr;
-  const plotBottomDevice = canvasHeight - gridArea.bottom * dpr;
+  const plotLeftDevice = gridArea.left * devicePixelRatio;
+  const plotRightDevice = canvasWidth - gridArea.right * devicePixelRatio;
+  const plotTopDevice = gridArea.top * devicePixelRatio;
+  const plotBottomDevice = canvasHeight - gridArea.bottom * devicePixelRatio;
 
   const scissorX = clampInt(Math.floor(plotLeftDevice), 0, Math.max(0, canvasWidth));
   const scissorY = clampInt(Math.floor(plotTopDevice), 0, Math.max(0, canvasHeight));
@@ -2877,7 +2906,7 @@ export function createRenderCoordinator(
     // Story 6: compute an x tick count that prevents label overlap (time axis only).
     // IMPORTANT: compute in CSS px, since labels are DOM elements in CSS px.
     // Note: This requires HTMLCanvasElement for accurate CSS pixel measurement.
-    const dpr = gpuContext.devicePixelRatio ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1);
+    const dpr = gridArea.devicePixelRatio;
     const canvasCssWidth = gpuContext.canvas ? getCanvasCssWidth(gpuContext.canvas, dpr) : 0;
     const visibleXRangeMs = Math.abs(visibleXDomain.max - visibleXDomain.min);
 
@@ -3016,14 +3045,14 @@ export function createRenderCoordinator(
           const yGridCss = interactionScales.yScale.scale(y);
 
           if (Number.isFinite(xGridCss) && Number.isFinite(yGridCss)) {
-            const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
             const centerCssX = gridArea.left + xGridCss;
             const centerCssY = gridArea.top + yGridCss;
 
             const plotScissor = computePlotScissorDevicePx(gridArea);
             const point: HighlightPoint = {
-              centerDeviceX: centerCssX * dpr,
-              centerDeviceY: centerCssY * dpr,
+              centerDeviceX: centerCssX * gridArea.devicePixelRatio,
+              centerDeviceY: centerCssY * gridArea.devicePixelRatio,
+              devicePixelRatio: gridArea.devicePixelRatio,
               canvasWidth: gridArea.canvasWidth,
               canvasHeight: gridArea.canvasHeight,
               scissor: plotScissor,
@@ -3625,9 +3654,11 @@ export function createRenderCoordinator(
 
       const yAxisName = currentOptions.yAxis.name?.trim() ?? '';
       if (yAxisName.length > 0) {
+        // In DOM mode: measure actual rendered label widths
+        // In worker mode: estimate based on character count and font size
         const maxTickLabelWidth =
           ySpans.length === 0
-            ? 0
+            ? estimateMaxYTickLabelWidth(collectedYLabels, currentOptions.theme.fontSize)
             : ySpans.reduce((max, s) => Math.max(max, s.getBoundingClientRect().width), 0);
 
         const yCenter = (plotTopCss + plotBottomCss) / 2;
