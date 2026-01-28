@@ -64,7 +64,6 @@ import type { DataZoomSlider } from '../components/createDataZoomSlider';
 import { createZoomState } from '../interaction/createZoomState';
 import type { ZoomState } from '../interaction/createZoomState';
 import { addAxisLabelsToOverlay } from '../utils/axisLabelStyling';
-import { DATA_ZOOM_SLIDER_RESERVE_CSS_PX } from '../config/OptionResolver';
 
 type AnyChartGPUEventCallback = ChartGPUEventCallback | ChartGPUCrosshairMoveCallback;
 
@@ -84,6 +83,10 @@ function generateMessageId(): string {
 function generateChartId(): string {
   return `chart_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 }
+
+// Data zoom slider overlay reserves bottom chart space (CSS px).
+// Keep in sync with ChartGPU.ts and createDataZoomSliderHost() in this file.
+const DATA_ZOOM_SLIDER_RESERVE_CSS_PX = 40;
 
 /**
  * Serializes DataPoint or OHLCDataPoint arrays to ArrayBuffer for zero-copy transfer.

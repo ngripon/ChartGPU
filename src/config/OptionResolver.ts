@@ -610,11 +610,14 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
 
 /**
  * Data zoom slider dimensions (CSS pixels).
- * Exported for use in worker proxy pointer event calculations.
+ *
+ * Note: these are internal implementation details used to reserve chart space for the
+ * slider overlay. We intentionally do not re-export them from the public entrypoint.
  */
-export const DATA_ZOOM_SLIDER_HEIGHT_CSS_PX = 32;
-export const DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX = 8;
-export const DATA_ZOOM_SLIDER_RESERVE_CSS_PX = DATA_ZOOM_SLIDER_HEIGHT_CSS_PX + DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX;
+const DATA_ZOOM_SLIDER_HEIGHT_CSS_PX = 32;
+const DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX = 8;
+const DATA_ZOOM_SLIDER_RESERVE_CSS_PX =
+  DATA_ZOOM_SLIDER_HEIGHT_CSS_PX + DATA_ZOOM_SLIDER_MARGIN_TOP_CSS_PX;
 
 /**
  * Checks if options include a slider-type dataZoom configuration.
