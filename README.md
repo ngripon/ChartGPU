@@ -150,7 +150,7 @@ GPU-binned density/heatmap mode for scatter plots (`mode: 'density'`) to reveal 
 
 10,000,000 points rendered at ~120 FPS (benchmark mode).
 
-![10 million point benchmark at 120 FPS](docs/assets/10-million-point-benchmark-120FPS.png)
+![10 million point benchmark at 120 FPS](docs/assets/ulimate-benchmark-example.png)
 
 ## Quick start
 
