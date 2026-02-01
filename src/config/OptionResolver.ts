@@ -569,23 +569,49 @@ const normalizeSamplingThreshold = (value: unknown): number | undefined => {
   return t > 0 ? t : undefined;
 };
 
+const normalizeAxisAutoBounds = (value: unknown): AxisConfig['autoBounds'] | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const v = value.trim().toLowerCase();
+  return v === 'global' || v === 'visible' ? (v as AxisConfig['autoBounds']) : undefined;
+};
+
 const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
 
 const computeRawBoundsFromData = (data: ReadonlyArray<DataPoint>): RawBounds | undefined => {
+  if (data.length === 0) return undefined;
+
   let xMin = Number.POSITIVE_INFINITY;
   let xMax = Number.NEGATIVE_INFINITY;
   let yMin = Number.POSITIVE_INFINITY;
   let yMax = Number.NEGATIVE_INFINITY;
 
-  for (let i = 0; i < data.length; i++) {
-    const p = data[i]!;
-    const x = isTupleDataPoint(p) ? p[0] : p.x;
-    const y = isTupleDataPoint(p) ? p[1] : p.y;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
+  // Hoist tuple-vs-object detection once (assume homogeneous arrays).
+  const isTuple = isTupleDataPoint(data[0]!);
+
+  if (isTuple) {
+    const dataAsTuples = data as ReadonlyArray<DataPointTuple>;
+    for (let i = 0; i < dataAsTuples.length; i++) {
+      const p = dataAsTuples[i]!;
+      const x = p[0];
+      const y = p[1];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  } else {
+    const dataAsObjects = data as ReadonlyArray<Exclude<DataPoint, DataPointTuple>>;
+    for (let i = 0; i < dataAsObjects.length; i++) {
+      const p = dataAsObjects[i]!;
+      const x = p.x;
+      const y = p.y;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
   }
 
   if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
@@ -732,6 +758,9 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         ...userOptions.xAxis,
         // runtime safety for JS callers
         type: (userOptions.xAxis as unknown as Partial<AxisConfig>).type ?? defaultOptions.xAxis.type,
+        autoBounds:
+          normalizeAxisAutoBounds((userOptions.xAxis as unknown as { readonly autoBounds?: unknown }).autoBounds) ??
+          (defaultOptions.xAxis as AxisConfig).autoBounds,
       }
     : { ...defaultOptions.xAxis };
 
@@ -741,6 +770,9 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         ...userOptions.yAxis,
         // runtime safety for JS callers
         type: (userOptions.yAxis as unknown as Partial<AxisConfig>).type ?? defaultOptions.yAxis.type,
+        autoBounds:
+          normalizeAxisAutoBounds((userOptions.yAxis as unknown as { readonly autoBounds?: unknown }).autoBounds) ??
+          defaultOptions.yAxis.autoBounds,
       }
     : { ...defaultOptions.yAxis };
 

@@ -1196,13 +1196,91 @@ const computeBaseXDomain = (
   return normalizeDomain(baseMin, baseMax);
 };
 
+/**
+ * Computes Y-axis domain bounds from the visible/rendered series data.
+ * This avoids scanning the full raw dataset when yAxis.autoBounds === 'visible'.
+ * 
+ * Performance: O(n) where n = total points across all visible series data.
+ * This is called only when renderSeries changes (zoom/pan/data updates), not per-frame.
+ */
+const computeVisibleYBounds = (series: ResolvedChartGPUOptions['series']): Bounds => {
+  let yMin = Number.POSITIVE_INFINITY;
+  let yMax = Number.NEGATIVE_INFINITY;
+
+  for (let s = 0; s < series.length; s++) {
+    const seriesConfig = series[s];
+    // Pie series are non-cartesian; they don't participate in y bounds.
+    if (seriesConfig.type === 'pie') continue;
+
+    // Candlestick series: scan low/high from visible data
+    if (seriesConfig.type === 'candlestick') {
+      const visibleOHLC = seriesConfig.data as ReadonlyArray<OHLCDataPoint>;
+      for (let i = 0; i < visibleOHLC.length; i++) {
+        const p = visibleOHLC[i]!;
+        const low = isTupleOHLCDataPoint(p) ? p[3] : p.low;
+        const high = isTupleOHLCDataPoint(p) ? p[4] : p.high;
+        if (!Number.isFinite(low) || !Number.isFinite(high)) continue;
+
+        // Use Math.min/max to handle inverted low/high gracefully
+        const yLow = Math.min(low, high);
+        const yHigh = Math.max(low, high);
+
+        if (yLow < yMin) yMin = yLow;
+        if (yHigh > yMax) yMax = yHigh;
+      }
+      continue;
+    }
+
+    // Cartesian series (line, area, bar, scatter): scan y from visible data
+    const data = seriesConfig.data;
+    for (let i = 0; i < data.length; i++) {
+      const { y } = getPointXY(data[i]);
+      if (!Number.isFinite(y)) continue;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  }
+
+  // Fallback for empty/invalid data: return safe default bounds
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
+  }
+
+  // Degenerate domain: add unit span to avoid zero-width range
+  if (yMin === yMax) yMax = yMin + 1;
+
+  return { xMin: 0, xMax: 1, yMin, yMax };
+};
+
 const computeBaseYDomain = (
   options: ResolvedChartGPUOptions,
-  runtimeRawBoundsByIndex?: ReadonlyArray<Bounds | null> | null
+  runtimeRawBoundsByIndex?: ReadonlyArray<Bounds | null> | null,
+  visibleBoundsOverride?: Bounds | null
 ): { readonly min: number; readonly max: number } => {
-  const bounds = computeGlobalBounds(options.series, runtimeRawBoundsByIndex);
-  const yMin = finiteOrUndefined(options.yAxis.min) ?? bounds.yMin;
-  const yMax = finiteOrUndefined(options.yAxis.max) ?? bounds.yMax;
+  // Explicit min/max ALWAYS take precedence over auto-bounds
+  const explicitMin = finiteOrUndefined(options.yAxis.min);
+  const explicitMax = finiteOrUndefined(options.yAxis.max);
+
+  // If both min and max are explicit, use them directly (no auto-bounds needed)
+  if (explicitMin !== undefined && explicitMax !== undefined) {
+    return normalizeDomain(explicitMin, explicitMax);
+  }
+
+  // Determine which bounds to use based on autoBounds mode
+  const autoBoundsMode = options.yAxis.autoBounds ?? 'visible';
+  let bounds: Bounds;
+
+  if (autoBoundsMode === 'visible' && visibleBoundsOverride) {
+    // Use visible bounds from renderSeries (zoom-aware, computed from visible data only)
+    bounds = visibleBoundsOverride;
+  } else {
+    // Use global bounds from full dataset (pre-zoom behavior, computed from all raw data)
+    bounds = computeGlobalBounds(options.series, runtimeRawBoundsByIndex);
+  }
+
+  // Merge explicit bounds with computed bounds (partial override support)
+  const yMin = explicitMin ?? bounds.yMin;
+  const yMax = explicitMax ?? bounds.yMax;
   return normalizeDomain(yMin, yMax);
 };
 
@@ -1662,6 +1740,27 @@ export function createRenderCoordinator(
   // Derived from `currentOptions.series` (which still includes baseline sampled `data`).
   let renderSeries: ResolvedChartGPUOptions['series'] = currentOptions.series;
 
+  // Cache for visible y-bounds computed from renderSeries (for yAxis.autoBounds === 'visible').
+  // Recomputed whenever renderSeries changes (zoom/pan/data updates).
+  let cachedVisibleYBounds: Bounds | null = null;
+
+  const shouldComputeVisibleYBounds = (opts: ResolvedChartGPUOptions): boolean => {
+    const autoBoundsMode = opts.yAxis.autoBounds ?? 'visible';
+    if (autoBoundsMode !== 'visible') return false;
+    // If both bounds are explicit, auto-bounds (including visible) are never consulted.
+    const explicitMin = finiteOrUndefined(opts.yAxis.min);
+    const explicitMax = finiteOrUndefined(opts.yAxis.max);
+    return !(explicitMin !== undefined && explicitMax !== undefined);
+  };
+
+  const recomputeCachedVisibleYBoundsIfNeeded = (): void => {
+    if (shouldComputeVisibleYBounds(currentOptions)) {
+      cachedVisibleYBounds = computeVisibleYBounds(renderSeries);
+    } else {
+      cachedVisibleYBounds = null;
+    }
+  };
+
   // Cache for sampled data with buffer zones - enables fast slicing during pan without resampling.
   interface SampledDataCache {
     data: ReadonlyArray<DataPoint> | ReadonlyArray<OHLCDataPoint>;
@@ -1679,6 +1778,10 @@ export function createRenderCoordinator(
   // When the debounce fires, we mark resampling "due" and schedule a unified flush.
   let zoomResampleDebounceTimer: number | null = null;
   let zoomResampleDue = false;
+
+  // Zoom changes can fire multiple times per frame; slicing and visible-bounds recompute can be O(n).
+  // Coalesce those updates to at most once per rendered frame.
+  let sliceRenderSeriesDue = false;
 
   // Coalesced streaming appends (flushed at the start of `render()`).
   const pendingAppendByIndex = new Map<number, Array<DataPoint | OHLCDataPoint>>();
@@ -2092,6 +2195,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const zoomRangeAfter = zoomState?.getRange() ?? null;
     if (zoomRangeAfter == null || isFullSpanZoomRange(zoomRangeAfter)) {
       renderSeries = runtimeBaseSeries;
+      // Recompute visible y-bounds from the baseline series
+      recomputeCachedVisibleYBoundsIfNeeded();
     }
 
     return true;
@@ -2117,6 +2222,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
       if (!zoomRange || zoomIsFullSpan) {
         renderSeries = runtimeBaseSeries;
+        // Recompute visible y-bounds from the baseline series
+        recomputeCachedVisibleYBoundsIfNeeded();
       } else {
         recomputeRenderSeries();
       }
@@ -2524,8 +2631,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       zoomState = createZoomState(cfg.start, cfg.end, constraints);
       lastOptionsZoomRange = { start: cfg.start, end: cfg.end };
       unsubscribeZoom = zoomState.onChange((range) => {
-        // Slice cached data immediately for smooth panning
-        sliceRenderSeriesToVisibleRange();
+        // Coalesce slicing (and visible-bounds recompute) to at most once per rendered frame.
+        sliceRenderSeriesDue = true;
         // Immediate render for UI feedback (axes/crosshair/slider).
         requestRender();
         // Debounce resampling; the unified flush will do the work.
@@ -2638,6 +2745,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     
     if (isFullSpan) {
       renderSeries = runtimeBaseSeries;
+      // Recompute visible y-bounds from the full baseline series
+      recomputeCachedVisibleYBoundsIfNeeded();
       return;
     }
 
@@ -2688,6 +2797,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
 
     renderSeries = next;
+    // Recompute visible y-bounds from the sliced renderSeries
+    recomputeCachedVisibleYBoundsIfNeeded();
   }
 
   function recomputeRenderSeries(): void {
@@ -2793,6 +2904,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
 
     renderSeries = next;
+    // Recompute visible y-bounds from the updated renderSeries
+    recomputeCachedVisibleYBoundsIfNeeded();
   }
 
   initRuntimeSeriesFromOptions();
@@ -2943,7 +3056,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
       const fromXBase = computeBaseXDomain(currentOptions, runtimeRawBoundsByIndex);
       const fromXVisible = computeVisibleXDomain(fromXBase, fromZoomRange);
-      const fromYBase = computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex);
+      const fromYBase = computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex, cachedVisibleYBounds);
       return {
         xBaseDomain: fromXBase,
         xVisibleDomain: { min: fromXVisible.min, max: fromXVisible.max },
@@ -2959,6 +3072,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     currentOptions = resolvedOptions;
     runtimeBaseSeries = resolvedOptions.series;
     renderSeries = resolvedOptions.series;
+    // Recompute visible y-bounds from the new series
+    cachedVisibleYBounds = null;
     gpuSeriesKindByIndex = new Array(resolvedOptions.series.length).fill('unknown');
     lastSampledData = new Array(resolvedOptions.series.length).fill(null);
     legend?.update(resolvedOptions.series, resolvedOptions.theme);
@@ -3014,6 +3129,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // If animation is explicitly disabled, ensure any running update transition is stopped.
     if (currentOptions.animation === false) {
       cancelUpdateTransition();
+      // Request a render to reflect the option changes immediately
+      requestRender();
       return;
     }
 
@@ -3021,13 +3138,17 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const toZoomRange = zoomState?.getRange() ?? null;
     const toXBase = computeBaseXDomain(currentOptions, runtimeRawBoundsByIndex);
     const toXVisible = computeVisibleXDomain(toXBase, toZoomRange);
-    const toYBase = computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex);
+    const toYBase = computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex, cachedVisibleYBounds);
     const toSeriesForTransition = renderSeries;
 
     const domainChanged = !isDomainEqual(fromSnapshot.xBaseDomain, toXBase) || !isDomainEqual(fromSnapshot.yBaseDomain, toYBase);
 
     const shouldAnimateUpdate = hasRenderedOnce && (domainChanged || likelyDataChanged);
-    if (!shouldAnimateUpdate) return;
+    if (!shouldAnimateUpdate) {
+      // Request a render even when not animating (e.g., theme changes, option updates)
+      requestRender();
+      return;
+    }
 
     const updateCfg = resolveUpdateAnimationConfig(currentOptions.animation);
     if (!updateCfg) return;
@@ -3145,6 +3266,11 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       executeFlush({ requestRenderAfter: false });
     }
 
+    if (sliceRenderSeriesDue) {
+      sliceRenderSeriesDue = false;
+      sliceRenderSeriesToVisibleRange();
+    }
+
     const hasCartesianSeries = currentOptions.series.some((s) => s.type !== 'pie');
     const seriesForIntro = renderSeries;
 
@@ -3234,7 +3360,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       : computeBaseXDomain(currentOptions, runtimeRawBoundsByIndex);
     const yBaseDomain = updateTransition
       ? lerpDomain(updateTransition.from.yBaseDomain, updateTransition.to.yBaseDomain, updateP)
-      : computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex);
+      : computeBaseYDomain(currentOptions, runtimeRawBoundsByIndex, cachedVisibleYBounds);
     const visibleXDomain = computeVisibleXDomain(baseXDomain, zoomRange);
 
     const plotClipRect = computePlotClipRect(gridArea);

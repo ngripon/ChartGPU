@@ -62,6 +62,15 @@ export interface AxisConfig {
   /** Tick length in CSS pixels (default: 6). */
   readonly tickLength?: number;
   readonly name?: string;
+  /**
+   * Axis domain auto-bounds mode (primarily used for y-axis):
+   * - `'global'`: derive from full dataset (pre-zoom behavior)
+   * - `'visible'`: derive from visible/zoomed data range (default for y-axis)
+   * 
+   * Note: explicit `min`/`max` always take precedence over auto-bounds.
+   * This option is primarily intended for `yAxis` (it has no effect on `xAxis` currently).
+   */
+  readonly autoBounds?: 'global' | 'visible';
 }
 
 export interface DataZoomConfig {

@@ -164,6 +164,14 @@ Bar styling options. See [`types.ts`](../../src/config/types.ts).
 ## Axis Configuration
 
 - **`AxisConfig`**: configuration for `xAxis` / `yAxis`. See [`types.ts`](../../src/config/types.ts).
+- **Explicit domains (override auto-bounds)**:
+  - **`AxisConfig.min?: number` / `AxisConfig.max?: number`**: when set, ChartGPU uses these explicit axis bounds and does **not** auto-derive bounds from data for that axis.
+  - **Precedence**: explicit `min`/`max` always override any auto-bounds behavior.
+- **Y-axis auto-bounds during x-zoom (new default)**:
+  - **`yAxis.autoBounds?: 'visible' | 'global'`** controls how ChartGPU derives the **y-axis** domain when `yAxis.min`/`yAxis.max` are not set.
+    - **`'visible'` (default)**: when x-axis data zoom is active, ChartGPU derives y-bounds from the **visible** (zoomed) x-range.
+    - **`'global'`**: derive y-bounds from the **full dataset** (pre-zoom behavior), even while x-zoomed.
+  - This option is intended for `yAxis` (it has no effect on `xAxis`).
 - **`xAxis.type: 'time'` (timestamps)**: when `xAxis.type === 'time'`, x-values are interpreted as **timestamps in milliseconds since Unix epoch** (the same unit accepted by `new Date(ms)`), including candlestick `timestamp` values. For GPU precision, ChartGPU may internally **rebase** large time x-values (e.g. epoch-ms domains) before uploading to Float32 vertex buffers; this is automatic and does not change your units. See the runtime axis label/tick logic in [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
 - **Time x-axis tick labels (automatic tiers)**: when `xAxis.type === 'time'`, x-axis tick labels are formatted based on the **current visible x-range** (after data zoom):
 
@@ -191,7 +199,9 @@ Bar styling options. See [`types.ts`](../../src/config/types.ts).
   - **Inside zoom**: when `ChartGPUOptions.dataZoom` includes `{ type: 'inside' }`, ChartGPU enables an internal wheel/drag interaction. See [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts) and [`createInsideZoom.ts`](../../src/interaction/createInsideZoom.ts).
   - **Zoom gesture**: mouse wheel zoom, centered on the current cursor x-position (only when the pointer is inside the plot grid).
   - **Pan gesture**: shift+left-drag or middle-mouse drag pans left/right (only when the pointer is inside the plot grid).
-  - **Scope**: x-axis only (the zoom window is applied to the x-domain; y-domain is unchanged).
+  - **Scope**: the zoom window is applied to the x-domain; the y-domain is derived from data unless you set explicit `yAxis.min`/`yAxis.max`.
+    - Default behavior: during x-zoom, `yAxis.autoBounds: 'visible'` derives y-bounds from the **visible** x-range.
+    - Opt out: set `yAxis.autoBounds: 'global'` to keep y-bounds derived from the **full dataset**, or set explicit `yAxis.min`/`yAxis.max`.
   - **Grid-only**: input is ignored outside the plot grid (respects `grid` margins).
   - **Slider UI**: when `ChartGPUOptions.dataZoom` includes `{ type: 'slider' }`, ChartGPU mounts a slider-style UI that manipulates the same percent zoom window. ChartGPU also reserves **40 CSS px** of additional bottom plot space so x-axis tick labels and the x-axis title remain visible above the slider overlay (you generally should not need to manually “make room” by increasing `grid.bottom`). This behavior is consistent between main-thread and worker-mode rendering. See [`ChartGPU.ts`](../../src/ChartGPU.ts), option resolution in [`OptionResolver.ts`](../../src/config/OptionResolver.ts), and the internal UI helper [`createDataZoomSlider.ts`](../../src/components/createDataZoomSlider.ts).
     - **Worker mode slider sync (streaming)**: when using worker rendering with a slider, the main-thread slider keeps its local clamping logic in sync with worker zoom clamping during streaming `appendData(...)` by caching per-series point counts and recomputing dataset-aware constraints. See [`ChartGPUWorkerProxy.ts`](../../src/worker/ChartGPUWorkerProxy.ts) and the coordinator’s constraint recomputation in [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
