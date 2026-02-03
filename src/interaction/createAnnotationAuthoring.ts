@@ -1,13 +1,16 @@
 /**
  * Annotation authoring helper for ChartGPU instances.
- * 
+ *
  * Provides right-click context menu for adding vertical lines and text annotations,
- * with undo/redo and JSON export capabilities.
+ * with undo/redo, JSON export, drag-to-reposition, and editing capabilities.
  */
 
 import type { ChartGPUInstance, ChartGPUHitTestResult } from '../ChartGPU';
 import type { AnnotationConfig, DataPoint, DataPointTuple, OHLCDataPoint, OHLCDataPointTuple } from '../config/types';
 import { defaultGrid } from '../config/defaults';
+import { createAnnotationHitTester } from './createAnnotationHitTester';
+import { createAnnotationDragHandler } from './createAnnotationDragHandler';
+import { createAnnotationConfigDialog } from '../components/createAnnotationConfigDialog';
 
 // Type guards and helpers
 const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
@@ -158,6 +161,40 @@ export function createAnnotationAuthoring(
   let historyIndex = 0;
   let disposed = false;
 
+  // Create hit tester, drag handler, and config dialog
+  const hitTester = createAnnotationHitTester(chart, canvas, {
+    lineTolerance: 8,
+    textTolerance: 4,
+    pointTolerance: 12,
+  });
+
+  const configDialog = createAnnotationConfigDialog(container, {
+    zIndex: menuZIndex,
+  });
+
+  const dragHandler = createAnnotationDragHandler(chart, canvas, {
+    onDragMove: (index, updates) => {
+      // Optimistic update without history
+      const current = getCurrentAnnotations();
+      const next = current.map((a, i) => (i === index ? { ...a, ...updates } as AnnotationConfig : a));
+      applyAnnotations(next);
+    },
+    onDragEnd: (index, updates) => {
+      // Final position with history push
+      const current = getCurrentAnnotations();
+      const next = current.map((a, i) => (i === index ? { ...a, ...updates } as AnnotationConfig : a));
+      applyAnnotations(next);
+      pushHistory(next);
+    },
+    onDragCancel: () => {
+      // Revert to last history state (no push)
+      const entry = history[historyIndex];
+      if (entry) {
+        applyAnnotations(entry.annotations);
+      }
+    },
+  });
+
   // Get current annotations
   const getCurrentAnnotations = (): readonly AnnotationConfig[] => {
     return chart.options.annotations ?? [];
@@ -203,33 +240,67 @@ export function createAnnotationAuthoring(
     menu.style.fontSize = '14px';
     menu.style.color = '#e0e0e0';
 
-    const createMenuItem = (text: string, onClick: () => void): HTMLDivElement => {
-      const item = document.createElement('div');
-      item.textContent = text;
-      item.style.padding = '8px 16px';
-      item.style.cursor = 'pointer';
-      item.style.transition = 'background-color 0.15s';
-      item.style.userSelect = 'none';
-
-      item.addEventListener('mouseenter', () => {
-        item.style.backgroundColor = '#2a2a3e';
-      });
-      item.addEventListener('mouseleave', () => {
-        item.style.backgroundColor = 'transparent';
-      });
-      item.addEventListener('click', () => {
-        onClick();
-        hideContextMenu();
-      });
-
-      return item;
-    };
-
-    menu.appendChild(createMenuItem('Add vertical line here', () => handleAddVerticalLine()));
-    menu.appendChild(createMenuItem('Add text note here', () => handleAddTextNote()));
-
     document.body.appendChild(menu);
     return menu;
+  };
+
+  const createMenuItem = (text: string, onClick: () => void): HTMLDivElement => {
+    const item = document.createElement('div');
+    item.textContent = text;
+    item.style.padding = '8px 16px';
+    item.style.cursor = 'pointer';
+    item.style.transition = 'background-color 0.15s';
+    item.style.userSelect = 'none';
+
+    item.addEventListener('mouseenter', () => {
+      item.style.backgroundColor = '#2a2a3e';
+    });
+    item.addEventListener('mouseleave', () => {
+      item.style.backgroundColor = 'transparent';
+    });
+    item.addEventListener('click', () => {
+      onClick();
+      hideContextMenu();
+    });
+
+    return item;
+  };
+
+  const createMenuSeparator = (): HTMLDivElement => {
+    const separator = document.createElement('div');
+    separator.style.height = '1px';
+    separator.style.backgroundColor = '#333';
+    separator.style.margin = '6px 0';
+    return separator;
+  };
+
+  const populateContextMenuForAnnotation = (
+    menu: HTMLDivElement,
+    annotationIndex: number,
+    annotation: AnnotationConfig
+  ): void => {
+    // Clear existing items
+    menu.innerHTML = '';
+
+    // Edit and delete for the annotation
+    menu.appendChild(createMenuItem('Edit annotation...', () => handleEditAnnotation(annotationIndex, annotation)));
+    menu.appendChild(createMenuItem('Delete annotation', () => handleDeleteAnnotation(annotationIndex)));
+    menu.appendChild(createMenuSeparator());
+
+    // Add new annotations
+    menu.appendChild(createMenuItem('Add vertical line here', () => handleAddVerticalLine()));
+    menu.appendChild(createMenuItem('Add horizontal line here', () => handleAddHorizontalLine()));
+    menu.appendChild(createMenuItem('Add text note here', () => handleAddTextNote()));
+  };
+
+  const populateContextMenuForEmptySpace = (menu: HTMLDivElement): void => {
+    // Clear existing items
+    menu.innerHTML = '';
+
+    // Add new annotations
+    menu.appendChild(createMenuItem('Add vertical line here', () => handleAddVerticalLine()));
+    menu.appendChild(createMenuItem('Add horizontal line here', () => handleAddHorizontalLine()));
+    menu.appendChild(createMenuItem('Add text note here', () => handleAddTextNote()));
   };
 
   // Toolbar DOM
@@ -294,8 +365,22 @@ export function createAnnotationAuthoring(
 
   const showContextMenu = (e: MouseEvent): void => {
     if (!contextMenu) return;
-    
+
     lastHitTestResult = chart.hitTest(e);
+
+    // Perform annotation hit test
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = e.clientX - rect.left;
+    const canvasY = e.clientY - rect.top;
+    const annotationHit = hitTester.hitTest(canvasX, canvasY);
+
+    if (annotationHit) {
+      // Right-clicked on an annotation - show edit/delete menu
+      populateContextMenuForAnnotation(contextMenu, annotationHit.annotationIndex, annotationHit.annotation);
+    } else {
+      // Right-clicked on empty space - show add menu
+      populateContextMenuForEmptySpace(contextMenu);
+    }
 
     contextMenu.style.display = 'block';
     contextMenu.style.left = `${e.clientX}px`;
@@ -304,7 +389,7 @@ export function createAnnotationAuthoring(
     // Adjust position if menu goes off-screen (check both viewport bounds)
     requestAnimationFrame(() => {
       if (!contextMenu || contextMenu.style.display !== 'block') return;
-      
+
       const menuRect = contextMenu.getBoundingClientRect();
       let adjustedX = e.clientX;
       let adjustedY = e.clientY;
@@ -425,33 +510,80 @@ export function createAnnotationAuthoring(
       return; // Outside grid, do nothing
     }
 
-    const current = getCurrentAnnotations();
-    const newAnnotation: AnnotationConfig = {
-      type: 'lineX',
-      x,
-      layer: 'aboveSeries',
-      style: {
-        color: '#ffa500',
-        lineWidth: 2,
-        lineDash: [4, 4],
-        opacity: 0.9,
-      },
-      label: {
-        text: 'Line',
-        offset: [8, 8],
-        anchor: 'start',
-        background: {
-          color: '#000000',
-          opacity: 0.7,
-          padding: [2, 6, 2, 6],
-          borderRadius: 4,
+    // Show configuration dialog
+    configDialog.showCreate(
+      'lineX',
+      {
+        type: 'lineX',
+        x,
+        layer: 'aboveSeries',
+        style: {
+          color: '#ffa500',
+          lineWidth: 2,
         },
       },
-    };
+      (config) => {
+        const current = getCurrentAnnotations();
+        const next = [...current, config as AnnotationConfig];
+        applyAnnotations(next);
+        pushHistory(next);
+      },
+      () => {
+        // Cancelled - do nothing
+      }
+    );
+  };
 
-    const next = [...current, newAnnotation];
-    applyAnnotations(next);
-    pushHistory(next);
+  // Handle "Add horizontal line here"
+  const handleAddHorizontalLine = (): void => {
+    if (!lastHitTestResult) return;
+
+    const { match, isInGrid, gridY } = lastHitTestResult;
+
+    let y: number;
+    if (match) {
+      // Use matched data point y
+      y = match.value[1];
+    } else if (isInGrid) {
+      // Compute y from grid position (need to implement gridYToDataY)
+      const rect = canvas.getBoundingClientRect();
+      const grid = chart.options.grid ?? defaultGrid;
+      const plotHeightCss = rect.height - (grid.top ?? defaultGrid.top) - (grid.bottom ?? defaultGrid.bottom);
+
+      // Get Y domain from yAxis
+      const yAxis = chart.options.yAxis;
+      const yMin = yAxis?.min ?? 0;
+      const yMax = yAxis?.max ?? 100;
+
+      // Invert Y (canvas top = max Y value)
+      const t = plotHeightCss > 0 ? 1 - gridY / plotHeightCss : 0.5;
+      y = yMin + t * (yMax - yMin);
+    } else {
+      return; // Outside grid, do nothing
+    }
+
+    // Show configuration dialog
+    configDialog.showCreate(
+      'lineY',
+      {
+        type: 'lineY',
+        y,
+        layer: 'aboveSeries',
+        style: {
+          color: '#ffa500',
+          lineWidth: 2,
+        },
+      },
+      (config) => {
+        const current = getCurrentAnnotations();
+        const next = [...current, config as AnnotationConfig];
+        applyAnnotations(next);
+        pushHistory(next);
+      },
+      () => {
+        // Cancelled - do nothing
+      }
+    );
   };
 
   // Handle "Add text note here"
@@ -460,43 +592,69 @@ export function createAnnotationAuthoring(
 
     const { match, isInGrid, gridX, gridY } = lastHitTestResult;
 
-    const text = prompt('Enter annotation text:', 'Note');
-    // Cancel or empty string should not create annotation
-    if (!text || text.trim().length === 0) return;
-
-    let newAnnotation: AnnotationConfig;
+    let space: 'data' | 'plot';
+    let x: number;
+    let y: number;
 
     if (match) {
       // Use data-space position
-      newAnnotation = {
-        type: 'text',
-        position: { space: 'data', x: match.value[0], y: match.value[1] },
-        text,
-        layer: 'aboveSeries',
-        style: {
-          color: '#00d4ff',
-          opacity: 1,
-        },
-      };
+      space = 'data';
+      x = match.value[0];
+      y = match.value[1];
     } else if (isInGrid) {
       // Use plot-space position
       const plotPos = gridToPlotSpace(gridX, gridY);
-      newAnnotation = {
-        type: 'text',
-        position: { space: 'plot', x: plotPos.x, y: plotPos.y },
-        text,
-        layer: 'aboveSeries',
-        style: {
-          color: '#00d4ff',
-          opacity: 1,
-        },
-      };
+      space = 'plot';
+      x = plotPos.x;
+      y = plotPos.y;
     } else {
       return; // Outside grid, do nothing
     }
 
+    // Show configuration dialog
+    configDialog.showCreate(
+      'text',
+      {
+        type: 'text',
+        position: { space, x, y },
+        text: 'Note',
+        layer: 'aboveSeries',
+        style: {
+          color: '#00d4ff',
+        },
+      },
+      (config) => {
+        const current = getCurrentAnnotations();
+        const next = [...current, config as AnnotationConfig];
+        applyAnnotations(next);
+        pushHistory(next);
+      },
+      () => {
+        // Cancelled - do nothing
+      }
+    );
+  };
+
+  // Handle "Edit annotation..."
+  const handleEditAnnotation = (index: number, annotation: AnnotationConfig): void => {
+    configDialog.showEdit(
+      annotation,
+      (updates) => {
+        const current = getCurrentAnnotations();
+        const next = current.map((a, i) => (i === index ? { ...a, ...updates } as AnnotationConfig : a));
+        applyAnnotations(next);
+        pushHistory(next);
+      },
+      () => {
+        // Cancelled - do nothing
+      }
+    );
+  };
+
+  // Handle "Delete annotation"
+  const handleDeleteAnnotation = (index: number): void => {
     const current = getCurrentAnnotations();
-    const next = [...current, newAnnotation];
+    const next = current.filter((_, i) => i !== index);
     applyAnnotations(next);
     pushHistory(next);
   };
@@ -612,6 +770,28 @@ export function createAnnotationAuthoring(
     });
   };
 
+  // Pointer down event handler for drag
+  const onPointerDown = (e: PointerEvent): void => {
+    if (disposed || e.button === 2) return; // Ignore right-click
+
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = e.clientX - rect.left;
+    const canvasY = e.clientY - rect.top;
+    const annotationHit = hitTester.hitTest(canvasX, canvasY);
+
+    if (annotationHit) {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+
+      dragHandler.startDrag(
+        annotationHit.annotationIndex,
+        annotationHit.annotation,
+        e.clientX,
+        e.clientY
+      );
+    }
+  };
+
   // Context menu event handler
   const onContextMenu = (e: MouseEvent): void => {
     if (disposed || !enableContextMenu) return;
@@ -710,6 +890,7 @@ export function createAnnotationAuthoring(
     if (disposed) return;
     disposed = true;
 
+    canvas.removeEventListener('pointerdown', onPointerDown);
     canvas.removeEventListener('contextmenu', onContextMenu);
     document.removeEventListener('click', onDocumentClick);
     document.removeEventListener('keydown', onDocumentKeyDown);
@@ -721,6 +902,10 @@ export function createAnnotationAuthoring(
 
     toolbar?.remove();
     toolbar = null;
+
+    hitTester.dispose();
+    dragHandler.dispose();
+    configDialog.dispose();
 
     history = [];
   };
@@ -735,6 +920,9 @@ export function createAnnotationAuthoring(
     window.addEventListener('scroll', onWindowScrollOrResize, true);
     window.addEventListener('resize', onWindowScrollOrResize);
   }
+
+  // Attach pointer event for dragging (always enabled)
+  canvas.addEventListener('pointerdown', onPointerDown);
 
   if (showToolbar) {
     toolbar = createToolbar();
