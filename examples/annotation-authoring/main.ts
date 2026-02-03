@@ -81,11 +81,12 @@ const createTimeSeries = (count: number): ReadonlyArray<DataPoint> => {
     const t = i / (n - 1);
     const x = startTs + i * stepMs;
 
-    const trend = (t - 0.5) * 1.25;
-    const slow = Math.sin(i * 0.06) * 0.9;
-    const hf = Math.sin(i * 0.28 + 0.7) * 0.18;
-    const noise = (Math.random() - 0.5) * 0.08;
-    const y = trend + slow + hf + noise;
+    // Bell curve centered at t=0.5 (global peak in middle)
+    const bellCurve = Math.exp(-8 * Math.pow(t - 0.5, 2)) * 0.6;
+    const slow = Math.sin(i * 0.06) * 0.2;
+    const hf = Math.sin(i * 0.28 + 0.7) * 0.1;
+    const noise = (Math.random() - 0.5) * 0.04;
+    const y = bellCurve + slow + hf + noise;
 
     out[i] = [x, y] as const;
   }
@@ -117,7 +118,7 @@ async function main(): Promise<void> {
   const options: ChartGPUOptions = {
     grid: { left: 70, right: 24, top: 24, bottom: 44 },
     xAxis: { type: 'time', name: 'Time (ms)' },
-    yAxis: { type: 'value', name: 'Value' },
+    yAxis: { type: 'value', name: 'Value', min: -0.2, max: 1.0 },
     tooltip: { trigger: 'axis' },
     dataZoom: [{ type: 'inside' }],
     palette: ['#4a9eff'],
@@ -222,7 +223,6 @@ async function main(): Promise<void> {
 
   // Create annotation authoring helper
   authoring = createAnnotationAuthoring(container, chart, {
-    showToolbar: true,
     enableContextMenu: true,
   });
 

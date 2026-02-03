@@ -152,6 +152,24 @@ GPU-binned density/heatmap mode for scatter plots (`mode: 'density'`) to reveal 
 
 ![10 million point benchmark at 120 FPS](docs/assets/ulimate-benchmark-example.png)
 
+### Interactive Annotation Authoring
+
+Full-featured annotation authoring system with interactive editing capabilities. Create, edit, drag, and delete annotations with an intuitive UI. Supports all annotation types: reference lines (horizontal/vertical), point markers, text annotations (plot-space + data-space tracking), labels, and styling options.
+
+![Annotations comprehensive demo](docs/assets/annotations.png)
+
+**Key features:**
+- **Right-click empty space** → Add vertical/horizontal line or text note with custom color, style & label
+- **Click & drag annotations** → Reposition them (lines constrained to their axis)
+- **Right-click on annotation** → Edit properties or delete
+- **Full styling control** → Color picker, line style (solid/dashed), line width, and label customization
+- **Undo/Redo support** → All annotations are reversible
+- **Scroll to zoom, Drag to pan** → Standard chart interactions work seamlessly
+
+![Annotation configuration dialog](docs/assets/annontations-add-indicator.png)
+
+The annotation authoring system is demonstrated in the [`examples/annotation-authoring/`](examples/annotation-authoring/) example.
+
 ## Quick start
 
 ```ts

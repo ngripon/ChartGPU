@@ -29,14 +29,6 @@ export interface AnnotationAuthoringOptions {
    */
   readonly menuZIndex?: number;
   /**
-   * Z-index for the toolbar (default: 10).
-   */
-  readonly toolbarZIndex?: number;
-  /**
-   * Enable toolbar with undo/redo/export buttons (default: true).
-   */
-  readonly showToolbar?: boolean;
-  /**
    * Enable right-click context menu (default: true).
    */
   readonly enableContextMenu?: boolean;
@@ -146,8 +138,6 @@ export function createAnnotationAuthoring(
 ): AnnotationAuthoringInstance {
   const {
     menuZIndex = 1000,
-    toolbarZIndex = 10,
-    showToolbar = true,
     enableContextMenu = true,
   } = options;
 
@@ -306,62 +296,7 @@ export function createAnnotationAuthoring(
     menu.appendChild(createMenuItem('Add text note here', () => handleAddTextNote()));
   };
 
-  // Toolbar DOM
-  let toolbar: HTMLDivElement | null = null;
-
-  const createToolbar = (): HTMLDivElement => {
-    const bar = document.createElement('div');
-    bar.style.position = 'absolute';
-    bar.style.top = '10px';
-    bar.style.right = '10px';
-    bar.style.display = 'flex';
-    bar.style.gap = '8px';
-    bar.style.backgroundColor = 'rgba(26, 26, 46, 0.9)';
-    bar.style.border = '1px solid #333';
-    bar.style.borderRadius = '6px';
-    bar.style.padding = '6px 8px';
-    bar.style.zIndex = String(toolbarZIndex);
-    bar.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-    bar.style.fontSize = '12px';
-
-    const createButton = (text: string, onClick: () => void, title?: string): HTMLButtonElement => {
-      const btn = document.createElement('button');
-      btn.textContent = text;
-      if (title) btn.title = title;
-      btn.style.padding = '4px 10px';
-      btn.style.backgroundColor = '#2a2a3e';
-      btn.style.color = '#e0e0e0';
-      btn.style.border = '1px solid #444';
-      btn.style.borderRadius = '4px';
-      btn.style.cursor = 'pointer';
-      btn.style.fontSize = '12px';
-      btn.style.transition = 'all 0.15s';
-      btn.style.userSelect = 'none';
-
-      btn.addEventListener('mouseenter', () => {
-        btn.style.backgroundColor = '#3a3a4e';
-        btn.style.borderColor = '#555';
-      });
-      btn.addEventListener('mouseleave', () => {
-        btn.style.backgroundColor = '#2a2a3e';
-        btn.style.borderColor = '#444';
-      });
-      btn.addEventListener('click', onClick);
-
-      return btn;
-    };
-
-    const undoBtn = createButton('Undo', () => undo(), 'Undo last annotation change');
-    const redoBtn = createButton('Redo', () => redo(), 'Redo annotation change');
-    const exportBtn = createButton('Export JSON', () => handleExportJSON(), 'Copy annotations JSON to clipboard');
-
-    bar.appendChild(undoBtn);
-    bar.appendChild(redoBtn);
-    bar.appendChild(exportBtn);
-
-    container.appendChild(bar);
-    return bar;
-  };
+  // Toolbar removed - UI decluttering
 
   // Show context menu
   let lastHitTestResult: ChartGPUHitTestResult | null = null;
@@ -945,9 +880,6 @@ export function createAnnotationAuthoring(
     contextMenu?.remove();
     contextMenu = null;
 
-    toolbar?.remove();
-    toolbar = null;
-
     hitTester.dispose();
     dragHandler.dispose();
     configDialog.dispose();
@@ -968,10 +900,6 @@ export function createAnnotationAuthoring(
 
   // Attach pointer event for dragging (always enabled)
   canvas.addEventListener('pointerdown', onPointerDown);
-
-  if (showToolbar) {
-    toolbar = createToolbar();
-  }
 
   return {
     addVerticalLine,

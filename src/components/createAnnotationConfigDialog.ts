@@ -202,32 +202,93 @@ export function createAnnotationConfigDialog(
     let currentColor = selectedColor;
 
     palette.forEach((color) => {
+      // Button wrapper for swatch
       const swatch = document.createElement('button');
       swatch.type = 'button';
+      swatch.dataset.color = color; // Store color for reliable comparison
       swatch.style.cssText = `
+        position: relative;
         width: 100%;
         aspect-ratio: 1;
         background: ${color};
-        border: 2px solid ${color === currentColor ? '#ffffff' : 'transparent'};
+        border: none;
         border-radius: 4px;
         cursor: pointer;
-        transition: transform 0.1s;
+        transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+        box-shadow: ${color === currentColor ? 'inset 0 0 0 2px #ffffff, inset 0 0 0 3px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.3)' : 'inset 0 0 0 1px rgba(255, 255, 255, 0.1)'};
+        transform: ${color === currentColor ? 'scale(1.05)' : 'scale(1)'};
       `;
+
+      // Create checkmark SVG for selected state
+      const checkmark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      checkmark.setAttribute('viewBox', '0 0 24 24');
+      checkmark.setAttribute('fill', 'none');
+      checkmark.style.cssText = `
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 60%;
+        height: 60%;
+        pointer-events: none;
+        opacity: ${color === currentColor ? '1' : '0'};
+        transition: opacity 0.15s ease-out;
+      `;
+
+      // Checkmark path with dual stroke for maximum contrast
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', 'M20 6L9 17l-5-5');
+      path.setAttribute('stroke', '#ffffff');
+      path.setAttribute('stroke-width', '3');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-linejoin', 'round');
+      path.style.cssText = `
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+      `;
+
+      checkmark.appendChild(path);
+      swatch.appendChild(checkmark);
+
+      // Click handler
       swatch.addEventListener('click', () => {
         currentColor = color;
         // Update all swatches
         Array.from(container.children).forEach((child) => {
           const btn = child as HTMLButtonElement;
-          const btnColor = btn.style.background;
-          btn.style.borderColor = btnColor === color ? '#ffffff' : 'transparent';
+          const btnColor = btn.dataset.color; // Use data attribute for reliable comparison
+          const isSelected = btnColor === color;
+
+          // Update box-shadow for border effect
+          btn.style.boxShadow = isSelected
+            ? 'inset 0 0 0 2px #ffffff, inset 0 0 0 3px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.3)'
+            : 'inset 0 0 0 1px rgba(255, 255, 255, 0.1)';
+
+          // Update scale
+          btn.style.transform = isSelected ? 'scale(1.05)' : 'scale(1)';
+
+          // Update checkmark visibility
+          const svg = btn.querySelector('svg');
+          if (svg) {
+            svg.style.opacity = isSelected ? '1' : '0';
+          }
         });
       });
+
+      // Hover effects
       swatch.addEventListener('mouseenter', () => {
-        swatch.style.transform = 'scale(1.1)';
+        if (color !== currentColor) {
+          swatch.style.transform = 'scale(1.1)';
+          swatch.style.boxShadow = 'inset 0 0 0 2px rgba(255, 255, 255, 0.2), 0 4px 12px rgba(0, 0, 0, 0.4)';
+        }
       });
+
       swatch.addEventListener('mouseleave', () => {
-        swatch.style.transform = 'scale(1)';
+        if (color !== currentColor) {
+          swatch.style.transform = 'scale(1)';
+          swatch.style.boxShadow = 'inset 0 0 0 1px rgba(255, 255, 255, 0.1)';
+        }
       });
+
       container.appendChild(swatch);
     });
 
