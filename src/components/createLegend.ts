@@ -48,7 +48,8 @@ const getPieSliceColor = (
 
 export function createLegend(
   container: HTMLElement,
-  position: LegendPosition = 'right'
+  position: LegendPosition = 'right',
+  onSeriesToggle?: (seriesIndex: number, sliceIndex?: number) => void
 ): Legend {
   const computedPosition = getComputedStyle(container).position;
   const didSetRelative = computedPosition === 'static';
@@ -60,7 +61,7 @@ export function createLegend(
 
   const root = document.createElement('div');
   root.style.position = 'absolute';
-  root.style.pointerEvents = 'none';
+  root.style.pointerEvents = 'auto';
   root.style.userSelect = 'none';
   root.style.boxSizing = 'border-box';
 
@@ -76,6 +77,55 @@ export function createLegend(
   list.style.display = 'flex';
   list.style.gap = '8px';
   root.appendChild(list);
+
+  // Event delegation for series toggle (fixes memory leak and improves performance)
+  if (onSeriesToggle) {
+    list.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const item = target.closest('[data-series-index]') as HTMLElement;
+      if (item) {
+        const seriesIndex = parseInt(item.dataset.seriesIndex!, 10);
+        if (!isNaN(seriesIndex)) {
+          // Check if this is a pie slice item
+          const sliceIndexStr = item.dataset.sliceIndex;
+          if (sliceIndexStr !== undefined) {
+            const sliceIndex = parseInt(sliceIndexStr, 10);
+            if (!isNaN(sliceIndex)) {
+              onSeriesToggle(seriesIndex, sliceIndex);
+              return;
+            }
+          }
+          // Regular series toggle
+          onSeriesToggle(seriesIndex);
+        }
+      }
+    });
+
+    // Keyboard navigation support for accessibility
+    list.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        const target = e.target as HTMLElement;
+        const item = target.closest('[data-series-index]') as HTMLElement;
+        if (item) {
+          e.preventDefault();
+          const seriesIndex = parseInt(item.dataset.seriesIndex!, 10);
+          if (!isNaN(seriesIndex)) {
+            // Check if this is a pie slice item
+            const sliceIndexStr = item.dataset.sliceIndex;
+            if (sliceIndexStr !== undefined) {
+              const sliceIndex = parseInt(sliceIndexStr, 10);
+              if (!isNaN(sliceIndex)) {
+                onSeriesToggle(seriesIndex, sliceIndex);
+                return;
+              }
+            }
+            // Regular series toggle
+            onSeriesToggle(seriesIndex);
+          }
+        }
+      }
+    });
+  }
 
   const applyPositionStyles = (p: LegendPosition): void => {
     // Clear positional styles first so changing position is safe/idempotent.
@@ -154,6 +204,7 @@ export function createLegend(
       if (s.type === 'pie') {
         for (let sliceIndex = 0; sliceIndex < s.data.length; sliceIndex++) {
           const slice = s.data[sliceIndex];
+          const isVisible = slice?.visible !== false;
 
           const item = document.createElement('div');
           item.style.display = 'flex';
@@ -161,6 +212,19 @@ export function createLegend(
           item.style.gap = '6px';
           item.style.lineHeight = '1.1';
           item.style.whiteSpace = 'nowrap';
+          item.style.cursor = onSeriesToggle ? 'pointer' : 'default';
+          item.style.opacity = isVisible ? '1' : '0.5';
+          item.style.transition = 'opacity 0.2s';
+
+          // Add accessibility attributes and data attributes for event delegation
+          if (onSeriesToggle) {
+            item.setAttribute('role', 'button');
+            item.setAttribute('aria-pressed', String(isVisible));
+            item.setAttribute('aria-label', `Toggle ${getPieSliceLabel(slice?.name, sliceIndex)} visibility`);
+            item.tabIndex = 0;
+            item.dataset.seriesIndex = String(seriesIndex);
+            item.dataset.sliceIndex = String(sliceIndex);
+          }
 
           const swatch = document.createElement('div');
           swatch.style.width = '10px';
@@ -172,18 +236,33 @@ export function createLegend(
 
           const label = document.createElement('span');
           label.textContent = getPieSliceLabel(slice?.name, sliceIndex);
+          label.style.textDecoration = isVisible ? 'none' : 'line-through';
 
           item.appendChild(swatch);
           item.appendChild(label);
           items.push(item);
         }
       } else {
+        const isVisible = s.visible !== false;
+
         const item = document.createElement('div');
         item.style.display = 'flex';
         item.style.alignItems = 'center';
         item.style.gap = '6px';
         item.style.lineHeight = '1.1';
         item.style.whiteSpace = 'nowrap';
+        item.style.cursor = onSeriesToggle ? 'pointer' : 'default';
+        item.style.opacity = isVisible ? '1' : '0.5';
+        item.style.transition = 'opacity 0.2s';
+
+        // Add accessibility attributes and data attribute for event delegation
+        if (onSeriesToggle) {
+          item.setAttribute('role', 'button');
+          item.setAttribute('aria-pressed', String(isVisible));
+          item.setAttribute('aria-label', `Toggle ${getSeriesName(s, seriesIndex)} visibility`);
+          item.tabIndex = 0;
+          item.dataset.seriesIndex = String(seriesIndex);
+        }
 
         const swatch = document.createElement('div');
         swatch.style.width = '10px';
@@ -195,6 +274,7 @@ export function createLegend(
 
         const label = document.createElement('span');
         label.textContent = getSeriesName(s, seriesIndex);
+        label.style.textDecoration = isVisible ? 'none' : 'line-through';
 
         item.appendChild(swatch);
         item.appendChild(label);

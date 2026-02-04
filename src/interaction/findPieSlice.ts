@@ -68,12 +68,13 @@ export function findPieSlice(
   const series = pieConfig.series;
   const data = series.data;
 
-  // Total positive value for angle allocation (mirrors renderer).
+  // Total positive value for angle allocation (mirrors renderer, exclude hidden slices).
   let total = 0;
   let validCount = 0;
   for (let i = 0; i < data.length; i++) {
-    const v = data[i]?.value;
-    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    const item = data[i];
+    const v = item?.value;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0 && item.visible !== false) {
       total += v;
       validCount++;
     }
@@ -92,6 +93,8 @@ export function findPieSlice(
     const slice = data[i];
     const v = slice?.value;
     if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue;
+    // Skip hidden slices
+    if (slice?.visible === false) continue;
 
     emitted++;
     const isLast = emitted === validCount;
@@ -107,8 +110,10 @@ export function findPieSlice(
     if (!(span > 0)) continue;
 
     const start = current;
-    const end = wrapToTau(current + span);
-    current = end;
+    // When there's only one visible slice, it should span the full circle (0 to TAU).
+    // Don't wrap the end angle in this case, as wrapping (start + TAU) gives start again.
+    const end = validCount === 1 ? current + TAU : wrapToTau(current + span);
+    current = wrapToTau(current + span);
 
     // Match `pie.wgsl` wedge test (span and rel in [0, TAU) with wrap).
     let wedgeSpan = end - start;

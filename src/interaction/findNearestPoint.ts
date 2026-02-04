@@ -505,7 +505,7 @@ export function findNearestPoint(
   const barSeriesIndexByBar: number[] = [];
   for (let s = 0; s < series.length; s++) {
     const cfg = series[s];
-    if (cfg?.type === 'bar') {
+    if (cfg?.type === 'bar' && cfg.visible !== false) {
       barSeriesConfigs.push(cfg);
       barSeriesIndexByBar.push(s);
     }
@@ -616,10 +616,26 @@ export function findNearestPoint(
     }
   }
 
+  // Build index mapping for non-bar cartesian series (scatter, line, area) to preserve original series indices
+  // after filtering for visibility, matching the pattern used for bar series above.
+  const cartesianSeriesConfigs: ResolvedSeriesConfig[] = [];
+  const cartesianSeriesIndexMap: number[] = [];
   for (let s = 0; s < series.length; s++) {
     const seriesCfg = series[s];
     // Pie and candlestick series are non-cartesian (or not yet implemented); they don't participate in x/y nearest-point hit-testing.
     if (seriesCfg.type === 'pie' || seriesCfg.type === 'candlestick') continue;
+
+    // Skip invisible series (matches bar series visibility check above).
+    if (seriesCfg.visible === false) continue;
+
+    cartesianSeriesConfigs.push(seriesCfg);
+    cartesianSeriesIndexMap.push(s);
+  }
+
+  for (let s = 0; s < cartesianSeriesConfigs.length; s++) {
+    const seriesCfg = cartesianSeriesConfigs[s];
+    const originalSeriesIndex = cartesianSeriesIndexMap[s] ?? -1;
+    if (originalSeriesIndex < 0) continue;
 
     const data = seriesCfg.data;
     const n = data.length;
@@ -693,11 +709,11 @@ export function findNearestPoint(
                   distSq < bestDistSq ||
                   (distSq === bestDistSq &&
                     (bestPoint === null ||
-                      s < bestSeriesIndex ||
-                      (s === bestSeriesIndex && left < bestDataIndex)));
+                      originalSeriesIndex < bestSeriesIndex ||
+                      (originalSeriesIndex === bestSeriesIndex && left < bestDataIndex)));
                 if (isBetter) {
                   bestDistSq = distSq;
-                  bestSeriesIndex = s;
+                  bestSeriesIndex = originalSeriesIndex;
                   bestDataIndex = left;
                   bestPoint = p;
                 }
@@ -731,11 +747,11 @@ export function findNearestPoint(
                   distSq < bestDistSq ||
                   (distSq === bestDistSq &&
                     (bestPoint === null ||
-                      s < bestSeriesIndex ||
-                      (s === bestSeriesIndex && right < bestDataIndex)));
+                      originalSeriesIndex < bestSeriesIndex ||
+                      (originalSeriesIndex === bestSeriesIndex && right < bestDataIndex)));
                 if (isBetter) {
                   bestDistSq = distSq;
-                  bestSeriesIndex = s;
+                  bestSeriesIndex = originalSeriesIndex;
                   bestDataIndex = right;
                   bestPoint = p;
                 }
@@ -805,11 +821,11 @@ export function findNearestPoint(
                   distSq < bestDistSq ||
                   (distSq === bestDistSq &&
                     (bestPoint === null ||
-                      s < bestSeriesIndex ||
-                      (s === bestSeriesIndex && left < bestDataIndex)));
+                      originalSeriesIndex < bestSeriesIndex ||
+                      (originalSeriesIndex === bestSeriesIndex && left < bestDataIndex)));
                 if (isBetter) {
                   bestDistSq = distSq;
-                  bestSeriesIndex = s;
+                  bestSeriesIndex = originalSeriesIndex;
                   bestDataIndex = left;
                   bestPoint = p;
                 }
@@ -843,11 +859,11 @@ export function findNearestPoint(
                   distSq < bestDistSq ||
                   (distSq === bestDistSq &&
                     (bestPoint === null ||
-                      s < bestSeriesIndex ||
-                      (s === bestSeriesIndex && right < bestDataIndex)));
+                      originalSeriesIndex < bestSeriesIndex ||
+                      (originalSeriesIndex === bestSeriesIndex && right < bestDataIndex)));
                 if (isBetter) {
                   bestDistSq = distSq;
-                  bestSeriesIndex = s;
+                  bestSeriesIndex = originalSeriesIndex;
                   bestDataIndex = right;
                   bestPoint = p;
                 }

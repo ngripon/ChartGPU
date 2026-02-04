@@ -71,7 +71,10 @@ See [`createInsideZoom.ts`](../../src/interaction/createInsideZoom.ts) and the e
 See [`findNearestPoint.ts`](../../src/interaction/findNearestPoint.ts).
 
 - **Function**: `findNearestPoint(series: ReadonlyArray<ResolvedSeriesConfig>, x: number, y: number, xScale: LinearScale, yScale: LinearScale, maxDistance?: number): NearestPointMatch | null`
-- **Returns**: `null` or `{ seriesIndex, dataIndex, point, distance }`
+- **Returns**: `null` or `{ seriesIndex, dataIndex, point, distance }` where `seriesIndex` is always relative to the input `series` array (original indices, not filtered)
+- **Visibility filtering (important)**: This helper filters for visible series internally (checks `cfg.visible !== false`). It accepts unfiltered series arrays and returns indices that correctly map back to the original array.
+  - **Index mapping pattern**: For non-bar cartesian series (line, area, scatter), the function maintains a `cartesianSeriesIndexMap` array that preserves original indices when iterating over filtered visible series. This ensures returned series indices always match the input `series` array.
+  - **Bar series pattern**: Bar series use a similar `barSeriesIndexByBar` mapping to track indices after filtering for visibility.
 - **Pie note (Story 4.14)**: pie series are **ignored** by this helper. Pie slices use a separate hit-test helper; see [`findPieSlice.ts`](../../src/interaction/findPieSlice.ts).
 - **Sorted-x requirement**: each series must be sorted by increasing `x` in domain space for the binary search path to be correct.
 - **Scatter hit-testing (Story 4.10)**:
@@ -112,6 +115,33 @@ See [`findPieSlice.ts`](../../src/interaction/findPieSlice.ts).
 - **Purpose**: finds the pie slice under a pointer position and returns `{ seriesIndex, dataIndex, slice }` when hit.
 - **Coordinate contract (critical)**: `x`/`y` are plot/grid-local CSS pixels (as produced by `payload.gridX`/`payload.gridY` from [`createEventManager.ts`](../../src/interaction/createEventManager.ts)), `center` is plot-local CSS pixels, and `radius` is in CSS pixels.
 - **Non-cartesian note**: pie slices are detected using polar angle + radius checks; they do not use `xScale`/`yScale` and do not affect cartesian bounds.
+
+### Index mapping and visibility filtering (internal pattern note)
+
+When hit-testing functions need to filter series by visibility and still return indices relative to the original input array, use an index mapping approach:
+
+```typescript
+// Filter visible series while preserving original indices
+const filteredConfigs: ResolvedSeriesConfig[] = [];
+const indexMap: number[] = [];
+for (let i = 0; i < allSeries.length; i++) {
+  if (allSeries[i].visible !== false) {
+    filteredConfigs.push(allSeries[i]);
+    indexMap.push(i); // Map filtered index to original
+  }
+}
+
+// Later, when a match is found at filteredIndex:
+const originalSeriesIndex = indexMap[filteredIndex];
+```
+
+This pattern is used in:
+- `findNearestPoint.ts` (lines 619-632): `cartesianSeriesIndexMap` for non-bar series
+- `findNearestPoint.ts` (lines 504-510): `barSeriesIndexByBar` for bar series
+- `findPointsAtX.ts`: Similar pattern for axis-trigger point lookups
+- `findPieSlice.ts` / `findCandlestick.ts`: Internal visibility checks
+
+**Why this matters**: When callers pass unfiltered series arrays to hit-testing functions, the returned indices must still be relative to the original array so they correctly identify which series in the input array was hit. This is critical for accurate tooltips, hover events, and click handling.
 
 ## Text overlay (internal / contributor notes)
 

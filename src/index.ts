@@ -48,6 +48,8 @@ export type {
   DataZoomConfig,
   DataPoint,
   GridConfig,
+  LegendConfig,
+  LegendPosition,
   LineStyleConfig,
   AreaSeriesConfig,
   LineSeriesConfig,
@@ -80,6 +82,8 @@ export type {
   ResolvedGridConfig,
   ResolvedLineSeriesConfig,
   ResolvedLineStyleConfig,
+  ResolvedPieDataItem,
+  ResolvedPieSeriesConfig,
   ResolvedSeriesConfig,
 } from './config/OptionResolver';
 
