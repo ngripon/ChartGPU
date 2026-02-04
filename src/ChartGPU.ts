@@ -954,6 +954,10 @@ export async function createChartGPU(
       for (let i = resolvedOptions.series.length - 1; i >= 0; i--) {
         const s = resolvedOptions.series[i];
         if (s.type !== 'pie') continue;
+
+        // Skip invisible series.
+        if (s.visible === false) continue;
+
         const pieSeries = s as ResolvedPieSeriesConfig;
         const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
         const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
@@ -977,6 +981,9 @@ export async function createChartGPU(
     for (let i = resolvedOptions.series.length - 1; i >= 0; i--) {
       const s = resolvedOptions.series[i];
       if (s?.type !== 'candlestick') continue;
+
+      // Skip invisible series.
+      if (s.visible === false) continue;
 
       const seriesCfg = s as ResolvedCandlestickSeriesConfig;
       const barWidthRange = computeCandlestickBodyWidthRange(seriesCfg, seriesCfg.data, scales.xScale, plotWidthCss);

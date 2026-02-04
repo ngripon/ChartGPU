@@ -124,7 +124,12 @@ export type ResolvedScatterSeriesConfig = Readonly<
   }
 >;
 
-export type ResolvedPieDataItem = Readonly<Omit<PieDataItem, 'color'> & { readonly color: string }>;
+export type ResolvedPieDataItem = Readonly<
+  Omit<PieDataItem, 'color' | 'visible'> & {
+    readonly color: string;
+    readonly visible: boolean;
+  }
+>;
 
 export type ResolvedPieSeriesConfig = Readonly<
   Omit<PieSeriesConfig, 'color' | 'data'> & {
@@ -165,7 +170,7 @@ export type ResolvedSeriesConfig =
   | ResolvedCandlestickSeriesConfig;
 
 export interface ResolvedChartGPUOptions
-  extends Omit<ChartGPUOptions, 'grid' | 'xAxis' | 'yAxis' | 'theme' | 'palette' | 'series'> {
+  extends Omit<ChartGPUOptions, 'grid' | 'xAxis' | 'yAxis' | 'theme' | 'palette' | 'series' | 'legend'> {
   readonly grid: ResolvedGridConfig;
   readonly xAxis: AxisConfig;
   readonly yAxis: AxisConfig;
@@ -174,6 +179,7 @@ export interface ResolvedChartGPUOptions
   readonly palette: ReadonlyArray<string>;
   readonly series: ReadonlyArray<ResolvedSeriesConfig>;
   readonly annotations?: ReadonlyArray<AnnotationConfig>;
+  readonly legend?: import('./types').LegendConfig;
 }
 
 const sanitizeDataZoom = (input: unknown): ReadonlyArray<DataZoomConfig> | undefined => {
@@ -781,6 +787,9 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
     const inheritedColor = theme.colorPalette[i % theme.colorPalette.length];
     const color = explicitColor ?? inheritedColor;
 
+    // Ensure visible defaults to true (converts undefined to true, preserves explicit false)
+    const visible = s.visible !== false;
+
     const sampling: SeriesSampling = normalizeSampling((s as unknown as { sampling?: unknown }).sampling) ?? 'lttb';
     const samplingThreshold: number =
       normalizeSamplingThreshold((s as unknown as { samplingThreshold?: unknown }).samplingThreshold) ?? 5000;
@@ -799,6 +808,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         const rawBounds = computeRawBoundsFromData(s.data);
         return {
           ...s,
+          visible,
           rawData: s.data,
           data: sampleSeriesDataPoints(s.data, sampling, samplingThreshold),
           color: effectiveColor,
@@ -826,6 +836,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
 
         return {
           ...rest,
+          visible,
           rawData: s.data,
           data: sampledData,
           color: effectiveStrokeColor,
@@ -848,6 +859,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         const rawBounds = computeRawBoundsFromData(s.data);
         return {
           ...s,
+          visible,
           rawData: s.data,
           data: sampleSeriesDataPoints(s.data, sampling, samplingThreshold),
           color,
@@ -871,6 +883,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
           ) ?? scatterDefaults.densityNormalization;
         return {
           ...s,
+          visible,
           rawData: s.data,
           data: sampleSeriesDataPoints(s.data, sampling, samplingThreshold),
           color,
@@ -894,13 +907,16 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         const resolvedData: ReadonlyArray<ResolvedPieDataItem> = (s.data ?? []).map((item, itemIndex) => {
           const itemColor = normalizeOptionalColor(item?.color);
           const fallback = theme.colorPalette[(i + itemIndex) % theme.colorPalette.length];
+          // Ensure visible defaults to true (converts undefined to true, preserves explicit false)
+          const itemVisible = item?.visible !== false;
           return {
             ...item,
             color: itemColor ?? fallback,
+            visible: itemVisible,
           };
         });
 
-        return { ...rest, color, data: resolvedData };
+        return { ...rest, visible, color, data: resolvedData };
       }
       case 'candlestick': {
         warnCandlestickNotImplemented();
@@ -908,7 +924,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
         const resolvedSampling: 'none' | 'ohlc' =
           normalizeCandlestickSampling((s as unknown as { sampling?: unknown }).sampling) ??
           candlestickDefaults.sampling;
-        
+
         const resolvedSamplingThreshold: number =
           normalizeSamplingThreshold((s as unknown as { samplingThreshold?: unknown }).samplingThreshold) ??
           candlestickDefaults.samplingThreshold;
@@ -932,6 +948,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
 
         return {
           ...s,
+          visible,
           rawData: s.data,
           data: sampledData,
           color,
@@ -962,6 +979,7 @@ export function resolveOptions(userOptions: ChartGPUOptions = {}): ResolvedChart
     theme,
     palette: theme.colorPalette,
     series,
+    legend: userOptions.legend,
   };
 }
 

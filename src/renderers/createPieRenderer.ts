@@ -288,12 +288,13 @@ export function createPieRenderer(device: GPUDevice, options?: PieRendererOption
       return;
     }
 
-    // Total positive value for angle allocation.
+    // Total positive value for angle allocation (exclude hidden slices).
     let total = 0;
     let validCount = 0;
     for (let i = 0; i < seriesConfig.data.length; i++) {
-      const v = seriesConfig.data[i]?.value;
-      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      const item = seriesConfig.data[i];
+      const v = item?.value;
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0 && item.visible !== false) {
         total += v;
         validCount++;
       }
@@ -320,6 +321,8 @@ export function createPieRenderer(device: GPUDevice, options?: PieRendererOption
       const item = seriesConfig.data[i];
       const v = item?.value;
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue;
+      // Skip hidden slices
+      if (item.visible === false) continue;
 
       emitted++;
       const isLast = emitted === validCount;
@@ -336,8 +339,10 @@ export function createPieRenderer(device: GPUDevice, options?: PieRendererOption
       if (!(span > 0)) continue;
 
       const startRad = current;
-      const endRad = wrapToTau(current + span);
-      current = endRad;
+      // When there's only one visible slice, it should span the full circle (0 to TAU).
+      // Don't wrap the end angle in this case, as wrapping (start + TAU) gives start again.
+      const endRad = validCount === 1 ? current + TAU : wrapToTau(current + span);
+      current = wrapToTau(current + span);
 
       const [r, g, b, a] = parseColor(item.color, seriesConfig.color);
 

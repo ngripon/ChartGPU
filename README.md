@@ -9,14 +9,18 @@
 <div align="center">
 
 [![Examples](https://img.shields.io/badge/Examples-Code%20Samples-blue?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/tree/main/examples)
-
 [![Documentation](https://img.shields.io/badge/Documentation-Getting%20Started-blue?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/blob/main/docs/GETTING_STARTED.md)
 
 [![npm version](https://img.shields.io/npm/v/chartgpu?style=for-the-badge&color=blue)](https://www.npmjs.com/package/chartgpu)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/blob/main/LICENSE)
 [![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?style=for-the-badge)](https://chartgpu.github.io/ChartGPU/)
 
+[<img src="https://hackerbadge.now.sh/api?id=46706528" alt="Featured on Hacker News" height="60" />](https://news.ycombinator.com/item?id=46706528)
+
+[<img src="https://awesome.re/mentioned-badge.svg" alt="Featured in Awesome WebGPU" height="50" />](https://github.com/mikbry/awesome-webgpu)
+
 </div>
+
 
 
 ChartGPU is a TypeScript charting library built on WebGPU for smooth, interactive rendering—especially when you have lots of data.
@@ -61,7 +65,7 @@ flowchart TB
 
       subgraph PublicEvents["Public events + hit-testing (ChartGPU.ts)"]
         Canvas --> PointerHandlers["Pointer listeners"]
-        PointerHandlers --> PublicHitTest["findNearestPoint() / findPieSlice()"]
+        PointerHandlers --> PublicHitTest["findNearestPoint() / findPieSlice()<br/>(with internal visibility filtering)"]
         PointerHandlers --> EmitEvents["emit('click'/'mouseover'/'mouseout')"]
       end
 
@@ -82,7 +86,7 @@ flowchart TB
 
       subgraph InternalOverlays["Internal interaction overlays (coordinator)"]
         Coordinator --> Events["createEventManager(canvas, gridArea)"]
-        Events --> OverlayHitTest["hover/tooltip hit-testing"]
+        Events --> OverlayHitTest["hover/tooltip hit-testing<br/>(hit-testing functions filter<br/>for visible series internally)"]
         Events --> InteractionX["interaction-x state (crosshair)"]
         Coordinator --> OverlaysDOM["DOM overlays: legend / tooltip / text labels / annotation labels"]
       end
@@ -211,7 +215,7 @@ await ChartGPU.create(container, {
 });
 ```
 
-See [Annotations Documentation](https://github.com/hunterg325/ChartGPU/blob/main/docs/api/options.md#annotations) and the [annotations example](https://github.com/hunterg325/ChartGPU/tree/main/examples/annotations).
+See [Annotations Documentation](https://github.com/hunterg325/ChartGPU/blob/main/docs/api/options.md#annotations) and the [annotations example](https://github.com/hunterg325/ChartGPU/tree/main/examples/annotation-authoring).
 
 ## Installation
 
@@ -257,7 +261,7 @@ See the [chartgpu-react repository](https://github.com/ChartGPU/chartgpu-react) 
 - Browse examples: [`examples/`](https://github.com/hunterg325/ChartGPU/tree/main/examples)
 - Run locally:
   - `npm install`
-  - `npm run dev` (opens `http://localhost:5176/examples/`)
+  - `npm run dev` (opens `http://localhost:5173/examples/`)
 
 ## Contributing
 

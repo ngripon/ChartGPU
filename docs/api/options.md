@@ -36,6 +36,15 @@ See [`types.ts`](../../src/config/types.ts) for the full type definition.
 - **`SeriesConfig`**: `LineSeriesConfig | AreaSeriesConfig | BarSeriesConfig | ScatterSeriesConfig | PieSeriesConfig | CandlestickSeriesConfig` (discriminated by `series.type`). See [`types.ts`](../../src/config/types.ts).
 - **Sampling (cartesian series only)**: cartesian series support optional `sampling?: 'none' | 'lttb' | 'average' | 'max' | 'min'` and optional `samplingThreshold?: number` (applied when the input series data length exceeds the threshold). When omitted, defaults are `sampling: 'lttb'` and `samplingThreshold: 5000` via [`resolveOptions`](../../src/config/OptionResolver.ts) and baseline defaults in [`defaults.ts`](../../src/config/defaults.ts). Sampling affects rendering and cartesian hit-testing only; axis auto-bounds are derived from raw (unsampled) series data unless you set `xAxis.min`/`xAxis.max` or `yAxis.min`/`yAxis.max` (see [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts)). When x-axis data zoom is enabled, sampling is re-applied against the **visible x-range** (from the percent-space zoom window in \([0, 100]\)) using raw data; visible-range slicing is applied **immediately** during zoom/pan for smooth visual feedback, while full resampling is **debounced (~100ms)** for performance; a ±10% buffer zone reduces resampling frequency during small pans (see [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts)). Pie series (`type: 'pie'`) do not support these fields (pie is non-cartesian).
 
+### Series Visibility
+
+- **`SeriesConfig.visible?: boolean`**: Controls whether a series is rendered and included in interaction (hover, tooltips, clicks).
+  - When `visible === false`, the series is hidden from both rendering and interaction hit-testing.
+  - When `visible !== false` (default), the series is visible and participates in rendering and interaction.
+- **Legend toggle interaction**: When users click legend items to toggle series visibility, the chart correctly updates both rendering and interaction state. Hovering over remaining visible series works correctly regardless of other series' visibility state.
+  - Hit-testing functions (`findNearestPoint`, `findPointsAtX`, `findPieSlice`, `findCandlestick`) filter for visible series internally and preserve correct series indices.
+  - This ensures tooltips, hover highlights, and click events work accurately on visible series after others are hidden.
+
 ### CandlestickSeriesConfig
 
 Extends shared series fields with `type: 'candlestick'` and OHLC-specific configuration. See [`types.ts`](../../src/config/types.ts).

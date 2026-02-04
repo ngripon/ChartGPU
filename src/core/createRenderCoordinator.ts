@@ -1437,7 +1437,49 @@ export function createRenderCoordinator(
   const axisLabelOverlay: TextOverlay | null = overlayContainer ? createTextOverlay(overlayContainer) : null;
   // Dedicated overlay for annotations (do not reuse axis label overlay).
   const annotationOverlay: TextOverlay | null = overlayContainer ? createTextOverlay(overlayContainer) : null;
-  const legend: Legend | null = overlayContainer ? createLegend(overlayContainer, 'right') : null;
+
+  const handleSeriesToggle = (seriesIndex: number, sliceIndex?: number): void => {
+    if (disposed) return;
+
+    const series = currentOptions.series;
+    if (seriesIndex < 0 || seriesIndex >= series.length) return;
+
+    const s = series[seriesIndex];
+    if (!s) return;
+
+    // Handle pie slice toggle
+    if (sliceIndex !== undefined && s.type === 'pie') {
+      const pieData = (s as ResolvedPieSeriesConfig).data;
+      if (sliceIndex < 0 || sliceIndex >= pieData.length) return;
+
+      const updatedData = pieData.map((slice, i) =>
+        i === sliceIndex
+          ? { ...slice, visible: slice.visible === false ? true : false }
+          : slice
+      );
+
+      const updatedSeries = series.map((seriesItem, i) =>
+        i === seriesIndex
+          ? ({ ...seriesItem, data: updatedData } as typeof seriesItem)
+          : seriesItem
+      );
+
+      setOptions({ ...currentOptions, series: updatedSeries });
+      return;
+    }
+
+    // Toggle regular series visibility
+    const updatedSeries = series.map((seriesItem, i) =>
+      i === seriesIndex
+        ? ({ ...seriesItem, visible: seriesItem.visible === false ? true : false } as typeof seriesItem)
+        : seriesItem
+    );
+
+    // Update options with new series array
+    setOptions({ ...currentOptions, series: updatedSeries });
+  };
+
+  const legend: Legend | null = overlayContainer ? createLegend(overlayContainer, 'right', handleSeriesToggle) : null;
   // Text measurement for axis labels. Only available in DOM contexts (not worker threads).
   const tickMeasureCtx: CanvasRenderingContext2D | null = (() => {
     if (typeof document === 'undefined') {
@@ -2315,9 +2357,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const maxRadiusCss = 0.5 * Math.min(plotWidthCss, plotHeightCss);
     if (!(maxRadiusCss > 0)) return null;
 
-    for (let i = currentOptions.series.length - 1; i >= 0; i--) {
+    // Iterate from last to first for correct z-ordering (last series drawn on top)
+    for (let i = series.length - 1; i >= 0; i--) {
       const s = series[i];
       if (s.type !== 'pie') continue;
+      // Skip invisible series (pie hit-testing should respect visibility)
+      if (s.visible === false) continue;
       const pieSeries = s as ResolvedPieSeriesConfig;
       const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
       const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
@@ -2334,9 +2379,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     gridY: number,
     interactionScales: NonNullable<ReturnType<typeof computeInteractionScalesGridCssPx>>
   ): { params: TooltipParams; match: { point: OHLCDataPoint }; seriesIndex: number } | null => {
+    // Iterate from last to first for correct z-ordering (last series drawn on top)
     for (let i = series.length - 1; i >= 0; i--) {
       const s = series[i];
       if (s.type !== 'candlestick') continue;
+      // Skip invisible series (candlestick hit-testing should respect visibility)
+      if (s.visible === false) continue;
 
       const cs = s as ResolvedCandlestickSeriesConfig;
       const barWidthClip = computeCandlestickBodyWidthRange(
@@ -2925,6 +2973,72 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return false;
   };
 
+  /**
+   * Checks if only series visibility changed (no data, type, or structural changes).
+   * Used to avoid starting update animations during simple visibility toggles.
+   */
+  const didOnlyVisibilityChange = (
+    prev: ResolvedChartGPUOptions['series'],
+    next: ResolvedChartGPUOptions['series']
+  ): boolean => {
+    if (prev.length !== next.length) return false;
+
+    let hasVisibilityChange = false;
+    for (let i = 0; i < prev.length; i++) {
+      const a = prev[i]!;
+      const b = next[i]!;
+
+      // Check if anything other than visibility changed
+      if (a.type !== b.type) return false;
+
+      if (a.type === 'pie') {
+        const aPie = a as ResolvedPieSeriesConfig;
+        const bPie = b as ResolvedPieSeriesConfig;
+
+        // For pie charts, check if data arrays have the same length
+        if (aPie.data.length !== bPie.data.length) return false;
+
+        // Check each slice to ensure only visibility changed
+        for (let j = 0; j < aPie.data.length; j++) {
+          const sliceA = aPie.data[j];
+          const sliceB = bPie.data[j];
+
+          // If both slices are undefined/null, continue
+          if (!sliceA && !sliceB) continue;
+          if (!sliceA || !sliceB) return false;
+
+          // Check if anything other than visibility changed in this slice
+          if (sliceA.name !== sliceB.name) return false;
+          if (sliceA.value !== sliceB.value) return false;
+          if (sliceA.color !== sliceB.color) return false;
+
+          // Check if visibility changed
+          const aSliceVisible = sliceA.visible !== false;
+          const bSliceVisible = sliceB.visible !== false;
+          if (aSliceVisible !== bSliceVisible) {
+            hasVisibilityChange = true;
+          }
+        }
+      } else {
+        const aAny = a as unknown as { readonly rawData?: ReadonlyArray<DataPoint>; readonly data: ReadonlyArray<DataPoint> };
+        const bAny = b as unknown as { readonly rawData?: ReadonlyArray<DataPoint>; readonly data: ReadonlyArray<DataPoint> };
+        const aRaw = (aAny.rawData ?? aAny.data) as ReadonlyArray<DataPoint>;
+        const bRaw = (bAny.rawData ?? bAny.data) as ReadonlyArray<DataPoint>;
+        if (aRaw !== bRaw) return false;
+        if (aRaw.length !== bRaw.length) return false;
+      }
+
+      // Check if visibility actually changed for this series
+      const aVisible = a.visible !== false;
+      const bVisible = b.visible !== false;
+      if (aVisible !== bVisible) {
+        hasVisibilityChange = true;
+      }
+    }
+
+    return hasVisibilityChange;
+  };
+
   const setOptions: RenderCoordinator['setOptions'] = (resolvedOptions) => {
     assertNotDisposed();
 
@@ -2955,6 +3069,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Cancel any prior update transition AFTER capturing the rebased "from" snapshot.
     cancelUpdateTransition();
     const likelyDataChanged = didSeriesDataLikelyChange(currentOptions.series, resolvedOptions.series);
+    const onlyVisibilityChanged = didOnlyVisibilityChange(currentOptions.series, resolvedOptions.series);
 
     currentOptions = resolvedOptions;
     runtimeBaseSeries = resolvedOptions.series;
@@ -3030,9 +3145,23 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
     const domainChanged = !isDomainEqual(fromSnapshot.xBaseDomain, toXBase) || !isDomainEqual(fromSnapshot.yBaseDomain, toYBase);
 
-    const shouldAnimateUpdate = hasRenderedOnce && (domainChanged || likelyDataChanged);
+    // Skip update animations when only visibility changed.
+    // This allows the intro animation system to handle visibility changes smoothly,
+    // whether an intro animation is running or not.
+    const shouldSkipUpdateAnimation = onlyVisibilityChanged;
+
+    const shouldAnimateUpdate = hasRenderedOnce && (domainChanged || likelyDataChanged) && !shouldSkipUpdateAnimation;
     if (!shouldAnimateUpdate) {
-      // Request a render even when not animating (e.g., theme changes, option updates)
+      // When visibility changes after intro is complete, retrigger the startup animation for all chart types
+      if (onlyVisibilityChanged && introPhase === 'done' && hasRenderedOnce) {
+        // Reset intro animation state to retrigger on next render
+        introAnimController.cancelAll();
+        introAnimId = null;
+        introPhase = 'pending';
+        introProgress01 = 0;
+      }
+
+      // Request a render even when not animating (e.g., theme changes, option updates, visibility toggles during intro)
       requestRender();
       return;
     }
@@ -3090,6 +3219,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
     );
     updateAnimId = id;
+
+    // Request initial render to kick off the animation.
+    // Without this, the animation won't start until something else triggers a render
+    // (e.g., pointer movement, which may not happen if the user is interacting with
+    // UI overlays like the legend).
+    requestRender();
   };
 
   const appendData: RenderCoordinator['appendData'] = (seriesIndex, newPoints) => {
@@ -3501,6 +3636,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Highlight: on hover, find nearest point and draw a ring highlight clipped to plot rect.
     if (effectivePointer.source === 'mouse' && effectivePointer.hasPointer && effectivePointer.isInGrid) {
       if (interactionScales) {
+        // findNearestPoint handles visibility filtering internally and returns correct series indices
         const match = findNearestPoint(
           seriesForRender,
           effectivePointer.gridX,
@@ -3561,6 +3697,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
           // - Tooltip should be driven by x only (no y).
           // - In 'axis' mode, show one entry per series nearest in x.
           // - In 'item' mode, pick a deterministic single entry (first matching series).
+          // findPointsAtX handles visibility filtering internally and returns correct series indices
           const matches = findPointsAtX(seriesForRender, effectivePointer.gridX, interactionScales.xScale);
           if (matches.length === 0) {
             hideTooltip();
@@ -3593,6 +3730,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         } else if (trigger === 'axis') {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
+          // findPieSliceAtPointer handles visibility filtering internally and returns correct series indices
           const pieMatch = findPieSliceAtPointer(
             seriesForRender,
             effectivePointer.gridX,
@@ -3623,6 +3761,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
             }
           } else {
             // Candlestick body hit-testing (mouse, axis trigger): include only when inside candle body.
+            // Hit-testing functions handle visibility filtering internally and return correct series indices
             const candlestickResult = findCandlestickAtPointer(
               seriesForRender,
               effectivePointer.gridX,
@@ -3697,6 +3836,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         } else {
           // Story 4.14: pie slice tooltip hit-testing (mouse only).
           // If the cursor is over a pie slice, prefer showing that slice tooltip.
+          // findPieSliceAtPointer handles visibility filtering internally and returns correct series indices
           const pieMatch = findPieSliceAtPointer(
             seriesForRender,
             effectivePointer.gridX,
@@ -3726,6 +3866,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
             }
           } else {
             // Candlestick body hit-testing (mouse, item trigger): prefer candle body over nearest-point logic.
+            // Hit-testing functions handle visibility filtering internally and return correct series indices
             const candlestickResult = findCandlestickAtPointer(
               seriesForRender,
               effectivePointer.gridX,
@@ -3796,6 +3937,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
     const introP = introPhase === 'running' ? clamp01(introProgress01) : 1;
 
+    // Preparation loop: prepare ALL series (including hidden) to maintain correct indices
     for (let i = 0; i < seriesForRender.length; i++) {
       const s = seriesForRender[i];
       switch (s.type) {
@@ -3929,9 +4071,16 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
     }
 
+    // Filter series by visibility for rendering (after preparation)
+    const visibleSeriesForRender = seriesForRender
+      .map((s, i) => ({ series: s, originalIndex: i }))
+      .filter(({ series }) => series.visible !== false);
+
     // Bars are prepared once and rendered via a single instanced draw call.
-    const yScaleForBars = introP < 1 ? createAnimatedBarYScale(yScale, plotClipRect, barSeriesConfigs, introP) : yScale;
-    barRenderer.prepare(barSeriesConfigs, dataStore, xScale, yScaleForBars, gridArea);
+    // Filter bar series by visibility before preparing renderer
+    const visibleBarSeriesConfigs = barSeriesConfigs.filter(s => s.visible !== false);
+    const yScaleForBars = introP < 1 ? createAnimatedBarYScale(yScale, plotClipRect, visibleBarSeriesConfigs, introP) : yScale;
+    barRenderer.prepare(visibleBarSeriesConfigs, dataStore, xScale, yScaleForBars, gridArea);
 
     // Prepare annotation GPU overlays (reference lines + point markers).
     // Note: these renderers expect CANVAS-LOCAL CSS pixel coordinates; the coordinator owns
@@ -3980,7 +4129,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Encode compute passes (scatter density) before the render pass.
     for (let i = 0; i < seriesForRender.length; i++) {
       const s = seriesForRender[i];
-      if (s.type === 'scatter' && s.mode === 'density') {
+      if (s.visible !== false && s.type === 'scatter' && s.mode === 'density') {
         scatterDensityRenderers[i].encodeCompute(encoder);
       }
     }
@@ -4008,11 +4157,14 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // - line strokes next
     // - highlight next (on top of strokes)
     // - axes last (on top)
-    gridRenderer.render(mainPass);
+    if (gridRenderer) {
+      gridRenderer.render(mainPass);
+    }
 
-    for (let i = 0; i < seriesForRender.length; i++) {
-      if (seriesForRender[i].type === 'pie') {
-        pieRenderers[i].render(mainPass);
+    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
+      const { series, originalIndex } = visibleSeriesForRender[idx];
+      if (series.type === 'pie') {
+        pieRenderers[originalIndex].render(mainPass);
       }
     }
 
@@ -4031,19 +4183,20 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
     }
 
-    for (let i = 0; i < seriesForRender.length; i++) {
-      if (shouldRenderArea(seriesForRender[i])) {
+    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
+      const { series, originalIndex } = visibleSeriesForRender[idx];
+      if (shouldRenderArea(series)) {
         // Line/area intro reveal: left-to-right plot scissor.
         if (introP < 1) {
           const w = clampInt(Math.floor(plotScissor.w * introP), 0, plotScissor.w);
           if (w > 0 && plotScissor.h > 0) {
             mainPass.setScissorRect(plotScissor.x, plotScissor.y, w, plotScissor.h);
-            areaRenderers[i].render(mainPass);
+            areaRenderers[originalIndex].render(mainPass);
             mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
           }
         } else {
           mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-          areaRenderers[i].render(mainPass);
+          areaRenderers[originalIndex].render(mainPass);
           mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
         }
       }
@@ -4054,33 +4207,35 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       barRenderer.render(mainPass);
       mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
     }
-    for (let i = 0; i < seriesForRender.length; i++) {
-      if (seriesForRender[i].type === 'candlestick') {
-        candlestickRenderers[i].render(mainPass);
+    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
+      const { series, originalIndex } = visibleSeriesForRender[idx];
+      if (series.type === 'candlestick') {
+        candlestickRenderers[originalIndex].render(mainPass);
       }
     }
-    for (let i = 0; i < seriesForRender.length; i++) {
-      const s = seriesForRender[i];
-      if (s.type !== 'scatter') continue;
-      if (s.mode === 'density') {
-        scatterDensityRenderers[i].render(mainPass);
+    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
+      const { series, originalIndex } = visibleSeriesForRender[idx];
+      if (series.type !== 'scatter') continue;
+      if (series.mode === 'density') {
+        scatterDensityRenderers[originalIndex].render(mainPass);
       } else {
-        scatterRenderers[i].render(mainPass);
+        scatterRenderers[originalIndex].render(mainPass);
       }
     }
-    for (let i = 0; i < seriesForRender.length; i++) {
-      if (seriesForRender[i].type === 'line') {
+    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
+      const { series, originalIndex } = visibleSeriesForRender[idx];
+      if (series.type === 'line') {
         // Line intro reveal: left-to-right plot scissor.
         if (introP < 1) {
           const w = clampInt(Math.floor(plotScissor.w * introP), 0, plotScissor.w);
           if (w > 0 && plotScissor.h > 0) {
             mainPass.setScissorRect(plotScissor.x, plotScissor.y, w, plotScissor.h);
-            lineRenderers[i].render(mainPass);
+            lineRenderers[originalIndex].render(mainPass);
             mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
           }
         } else {
           mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-          lineRenderers[i].render(mainPass);
+          lineRenderers[originalIndex].render(mainPass);
           mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
         }
       }

@@ -1,7 +1,5 @@
-import { ChartGPU } from '../../src/index';
-import type { ChartGPUInstance, ChartGPUOptions, DataPoint } from '../../src/index';
-import { createAnnotationAuthoring } from '../../src/index';
-import type { AnnotationAuthoringInstance } from '../../src/index';
+import { ChartGPU, createAnnotationAuthoring } from '../../src/index';
+import type { ChartGPUInstance, ChartGPUOptions, DataPoint, AnnotationAuthoringInstance } from '../../src/index';
 
 const showError = (message: string): void => {
   const el = document.getElementById('error');

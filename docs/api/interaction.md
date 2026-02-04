@@ -25,6 +25,16 @@ For `'click' | 'mouseover' | 'mouseout'`, callbacks receive a `ChartGPUEventPayl
 - `seriesName: string | null`: series name from `series[i].name` (trimmed), or `null` if not on a chart item or name is empty. Note: for pie slices this is still the series `name` (slice `name` is not included in event payload).
 - `event: PointerEvent`: the original browser `PointerEvent` for access to client coordinates, timestamps, etc.
 
+### Series visibility and hit-testing
+
+- When a series is hidden (via `visible: false` or legend toggle), it does **not** participate in hit-testing for hovering, tooltips, or click events.
+- Hit-testing functions handle visibility filtering internally and always return correct series indices (relative to the original series array, not filtered arrays).
+- This means:
+  - Hovering over visible series works correctly regardless of other series being hidden
+  - Tooltips display the correct series name and index
+  - Click events report the correct series index
+  - Multi-series interactions (axis-trigger tooltips, crosshair sync) only include visible series
+
 For `'crosshairMove'`, callbacks receive a `ChartGPUCrosshairMovePayload` object with:
 - `x: number | null`: current interaction x in domain units (`null` clears/hides crosshair + tooltip)
 - `source?: unknown`: optional token identifying the origin of the update (useful for sync loop prevention; passed through `setInteractionX(...)` / `setCrosshairX(...)` and forwarded by `connectCharts(...)`)

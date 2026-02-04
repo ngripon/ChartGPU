@@ -9,18 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Horizontal scroll panning** - Touchpad users can now pan the chart view by scrolling left/right. The zoom handler now detects horizontal scroll dominance and performs pan operations accordingly.
+- **Annotation color picker visual indicator** - Color picker in annotation configuration dialog now displays a checkmark icon, dual-layer border highlighting, and elevation effect on the selected color for clear visual feedback.
 
 ### Changed
 - **Render-on-demand performance** - Charts no longer re-render continuously at 60fps when idle. Rendering now only occurs when `requestRender()` is called (triggered automatically by chart interactions and data changes), significantly reducing CPU and GPU usage to near 0% when idle. The Million Points example now includes a "Benchmark mode" toggle to switch between continuous rendering (for performance measurement) and render-on-demand (for idle efficiency).
+- **Annotation authoring example improvements** - Updated the annotation authoring example with bell curve data generation to position the peak point in the center of the chart, and added explicit Y-axis bounds (min: -0.2, max: 1.0) to provide proper spacing and prevent peak points from appearing at the extreme top edge.
 
 ### Deprecated
 
 ### Removed
 - **Worker mode support** - Removed worker mode rendering support, including `ChartGPU.createInWorker`, the `chartgpu/worker` subpath entrypoint, and the worker protocol/types.
+- **Annotation authoring toolbar** - Removed undo/redo/export JSON toolbar buttons from the annotation authoring interface to streamline the UI and reduce visual clutter.
 
 ### Fixed
+- **Hover interaction with hidden series** - Fixed critical bug where disabling a series via legend toggle prevented hovering over points in remaining visible series. The issue was caused by pre-filtering series arrays before calling hit-testing functions, which resulted in series index misalignment (indices relative to filtered array instead of original array). Now passes unfiltered series arrays to all hit-testing functions (`findNearestPoint`, `findPointsAtX`, `findPieSliceAtPointer`, `findCandlestickAtPointer`), which handle visibility filtering internally and return correct series indices. Also added index mapping to `findNearestPoint` for non-bar cartesian series to ensure correctness even when called with filtered arrays. Applies to all chart types (line, area, scatter, bar, candlestick, pie).
+- **Single visible pie slice rendering** - Fixed bug where having only one visible series/slice in a pie chart rendered as a thin vertical sliver instead of a complete circle. The pie renderer now correctly handles the edge case where a single slice should span the full 360 degrees without angle wrapping.
+- **Bar chart series visibility** - Fixed bug where clicking to disable a bar series in the legend didn't actually hide the bars. The bar renderer now filters out hidden series before preparation, matching the behavior of line, area, and pie renderers.
+- **Animation retriggering on legend toggle** - Fixed issue where toggling series visibility via legend clicks did not retrigger the startup animation. The chart now resets the intro animation phase to 'pending' when visibility changes occur after the initial animation completes, causing the chart to animate in from scratch with each visibility toggle. Applies to all chart types with startup animations (bar, scatter, pie/donut).
+- **Animation interruption during legend toggle** - Fixed issue where ongoing animations (startup/intro, data update) were interrupted when clicking legend items to toggle series visibility. The chart now preserves ongoing intro animations during visibility-only changes and skips starting conflicting update animations.
+- **Legend toggle render delay** - Fixed issue where clicking legend items to hide/show series didn't update immediately when animations were enabled. The chart now triggers an initial render when starting update animations, ensuring legend toggles take effect immediately without requiring mouse movement.
 - **Scissor rect clipping during zoom** - Fixed visual bug where chart data extended past axis boundaries during zoom interactions. Scissor rects are now applied consistently to line and area renderers during all rendering operations, not just intro animations.
-- **Grouped bar layout** - Fixed grouped/clustered bar rendering so bars stay clipped to the plot grid and do not overlap within a category. Also tightened the default intra-group spacing (`barGap`) for a more “flush” grouped look (see `examples/grouped-bar`).
+- **Grouped bar layout** - Fixed grouped/clustered bar rendering so bars stay clipped to the plot grid and do not overlap within a category. Also tightened the default intra-group spacing (`barGap`) for a more "flush" grouped look (see `examples/grouped-bar`).
+- **Annotation color picker selection** - Fixed color comparison logic in annotation color picker that prevented the visual selection indicator from appearing. Now uses data attributes for reliable color matching instead of computed RGB styles.
 
 ### Security
 

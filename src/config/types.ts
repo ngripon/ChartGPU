@@ -100,6 +100,12 @@ export interface SeriesConfigBase {
   readonly data: ReadonlyArray<DataPoint>;
   readonly color?: string;
   /**
+   * Controls whether the series is visible and rendered.
+   * When `false`, the series is hidden from the chart and excluded from interactions.
+   * Defaults to `true`.
+   */
+  readonly visible?: boolean;
+  /**
    * Optional per-series sampling strategy for large datasets.
    *
    * When `sampling !== 'none'` and `data.length > samplingThreshold`, ChartGPU may downsample
@@ -195,7 +201,17 @@ export interface ScatterSeriesConfig extends SeriesConfigBase {
   readonly symbol?: ScatterSymbol;
 }
 
-export type PieDataItem = Readonly<{ value: number; name: string; color?: string }>;
+export type PieDataItem = Readonly<{
+  value: number;
+  name: string;
+  color?: string;
+  /**
+   * Controls whether the pie slice is visible and rendered.
+   * When `false`, the slice is hidden from the chart and excluded from interactions.
+   * Defaults to `true`.
+   */
+  visible?: boolean;
+}>;
 
 export interface PieItemStyleConfig {
   readonly borderRadius?: number;
@@ -299,6 +315,19 @@ export interface AnimationConfig {
   readonly easing?: 'linear' | 'cubicOut' | 'cubicInOut' | 'bounceOut';
   /** Animation delay in ms. */
   readonly delay?: number;
+}
+
+/**
+ * Legend position within the chart.
+ */
+export type LegendPosition = 'top' | 'bottom' | 'left' | 'right';
+
+/**
+ * Legend configuration for series display.
+ */
+export interface LegendConfig {
+  readonly show?: boolean;
+  readonly position?: LegendPosition;
 }
 
 
@@ -539,6 +568,7 @@ export interface ChartGPUOptions {
    */
   readonly palette?: ReadonlyArray<string>;
   readonly tooltip?: TooltipConfig;
+  readonly legend?: LegendConfig;
   /**
    * Animation configuration for transitions.
    *
