@@ -25,6 +25,7 @@ import {
 import { renderAxisLabels } from './renderCoordinator/render/renderAxisLabels';
 import { renderAnnotationLabels } from './renderCoordinator/render/renderAnnotationLabels';
 import { prepareOverlays } from './renderCoordinator/render/renderOverlays';
+import { processAnnotations } from './renderCoordinator/annotations/processAnnotations';
 import {
   prepareSeries,
   encodeScatterDensityCompute,
@@ -1193,12 +1194,6 @@ export function createRenderCoordinator(
     updateInterpolationCaches.cartesianDataBySeriesIndex.length = 0;
     updateInterpolationCaches.pieDataBySeriesIndex.length = 0;
   };
-
-  // PERFORMANCE: Reusable arrays for annotation processing (avoid allocations per frame)
-  const annotationLineBelow: ReferenceLineInstance[] = [];
-  const annotationLineAbove: ReferenceLineInstance[] = [];
-  const annotationMarkerBelow: AnnotationMarkerInstance[] = [];
-  const annotationMarkerAbove: AnnotationMarkerInstance[] = [];
 
   const interpolateCartesianSeriesDataByIndex = (
     fromData: ReadonlyArray<DataPoint>,
@@ -3035,104 +3030,38 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const plotWidthCss = Math.max(0, plotRightCss - plotLeftCss);
     const plotHeightCss = Math.max(0, plotBottomCss - plotTopCss);
 
-    const resolveAnnotationRgba = (color: string | undefined, opacity: number | undefined): readonly [number, number, number, number] => {
-      const base =
-        parseCssColorToRgba01(color ?? currentOptions.theme.textColor) ??
-        parseCssColorToRgba01(currentOptions.theme.textColor) ??
-        ([1, 1, 1, 1] as const);
-      const o = opacity == null ? 1 : clamp01(opacity);
-      return [clamp01(base[0]), clamp01(base[1]), clamp01(base[2]), clamp01(base[3] * o)] as const;
-    };
-
+    // Process annotations (convert to GPU instances for rendering)
     const annotations: ReadonlyArray<AnnotationConfig> = hasCartesianSeries ? (currentOptions.annotations ?? []) : [];
+    const annotationResult = processAnnotations({
+      annotations,
+      xScale,
+      yScale,
+      plotBounds: {
+        leftCss: plotLeftCss,
+        rightCss: plotRightCss,
+        topCss: plotTopCss,
+        bottomCss: plotBottomCss,
+        widthCss: plotWidthCss,
+        heightCss: plotHeightCss,
+      },
+      canvasCssWidth: canvasCssWidthForAnnotations,
+      canvasCssHeight: canvasCssHeightForAnnotations,
+      theme: currentOptions.theme,
+    });
 
-    // PERFORMANCE: Reuse arrays from previous frame (clear and reuse to avoid allocations)
-    annotationLineBelow.length = 0;
-    annotationLineAbove.length = 0;
-    annotationMarkerBelow.length = 0;
-    annotationMarkerAbove.length = 0;
-
-    // PERFORMANCE: Early exit if no annotations or invalid canvas dimensions
-    if (annotations.length > 0 && canvasCssWidthForAnnotations > 0 && canvasCssHeightForAnnotations > 0 && plotWidthCss > 0 && plotHeightCss > 0) {
-      for (let i = 0; i < annotations.length; i++) {
-        const a = annotations[i]!;
-        const layer = a.layer ?? 'aboveSeries';
-        const targetLines = layer === 'belowSeries' ? annotationLineBelow : annotationLineAbove;
-        const targetMarkers = layer === 'belowSeries' ? annotationMarkerBelow : annotationMarkerAbove;
-
-        const styleColor = a.style?.color;
-        const styleOpacity = a.style?.opacity;
-        const lineWidth = typeof a.style?.lineWidth === 'number' && Number.isFinite(a.style.lineWidth) ? Math.max(0, a.style.lineWidth) : 1;
-        const lineDash = a.style?.lineDash;
-        const rgba = resolveAnnotationRgba(styleColor, styleOpacity);
-
-        switch (a.type) {
-          case 'lineX': {
-            const xClip = xScale.scale(a.x);
-            const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-            if (!Number.isFinite(xCss)) break;
-            targetLines.push({
-              axis: 'vertical',
-              positionCssPx: xCss,
-              lineWidth,
-              lineDash,
-              rgba,
-            });
-            break;
-          }
-          case 'lineY': {
-            const yClip = yScale.scale(a.y);
-            const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-            if (!Number.isFinite(yCss)) break;
-            targetLines.push({
-              axis: 'horizontal',
-              positionCssPx: yCss,
-              lineWidth,
-              lineDash,
-              rgba,
-            });
-            break;
-          }
-          case 'point': {
-            const xClip = xScale.scale(a.x);
-            const yClip = yScale.scale(a.y);
-            const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-            const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-            if (!Number.isFinite(xCss) || !Number.isFinite(yCss)) break;
-
-            const markerSize =
-              typeof a.marker?.size === 'number' && Number.isFinite(a.marker.size) ? Math.max(1, a.marker.size) : 6;
-            const markerColor = a.marker?.style?.color ?? a.style?.color;
-            const markerOpacity = a.marker?.style?.opacity ?? a.style?.opacity;
-            const fillRgba = resolveAnnotationRgba(markerColor, markerOpacity);
-
-            targetMarkers.push({
-              xCssPx: xCss,
-              yCssPx: yCss,
-              sizeCssPx: markerSize,
-              fillRgba,
-            });
-            break;
-          }
-          case 'text': {
-            // Text annotations are handled via DOM overlays / callbacks (labels), not GPU.
-            break;
-          }
-          default:
-            assertUnreachable(a);
-        }
-      }
-    }
-
-    // PERFORMANCE: Use array references directly instead of spreading (avoids allocation)
+    // Extract annotation instances for GPU rendering
     const combinedReferenceLines: ReadonlyArray<ReferenceLineInstance> =
-      annotationLineBelow.length + annotationLineAbove.length > 0 ? [...annotationLineBelow, ...annotationLineAbove] : [];
+      annotationResult.linesBelow.length + annotationResult.linesAbove.length > 0
+        ? [...annotationResult.linesBelow, ...annotationResult.linesAbove]
+        : [];
     const combinedMarkers: ReadonlyArray<AnnotationMarkerInstance> =
-      annotationMarkerBelow.length + annotationMarkerAbove.length > 0 ? [...annotationMarkerBelow, ...annotationMarkerAbove] : [];
-    const referenceLineBelowCount = annotationLineBelow.length;
-    const referenceLineAboveCount = annotationLineAbove.length;
-    const markerBelowCount = annotationMarkerBelow.length;
-    const markerAboveCount = annotationMarkerAbove.length;
+      annotationResult.markersBelow.length + annotationResult.markersAbove.length > 0
+        ? [...annotationResult.markersBelow, ...annotationResult.markersAbove]
+        : [];
+    const referenceLineBelowCount = annotationResult.linesBelow.length;
+    const referenceLineAboveCount = annotationResult.linesAbove.length;
+    const markerBelowCount = annotationResult.markersBelow.length;
+    const markerAboveCount = annotationResult.markersAbove.length;
 
     // Story 6: compute an x tick count that prevents label overlap (time axis only).
     // IMPORTANT: compute in CSS px, since labels are DOM elements in CSS px.
