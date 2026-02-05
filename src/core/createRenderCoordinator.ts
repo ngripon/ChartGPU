@@ -26,6 +26,7 @@ import {
   isTupleDataArray as isTupleDataArrayImported,
   isTupleOHLCDataPoint as isTupleOHLCDataPointImported,
 } from './renderCoordinator/data/computeVisibleSlice';
+import { renderAxisLabels } from './renderCoordinator/render/renderAxisLabels';
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
@@ -4008,140 +4009,15 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     hasRenderedOnce = true;
 
     // Generate axis labels for DOM overlay
-    const shouldGenerateAxisLabels = hasCartesianSeries && (axisLabelOverlay && overlayContainer);
-
-    if (shouldGenerateAxisLabels) {
-
-      // Get canvas dimensions
-      const canvasCssWidth = getCanvasCssWidth(gpuContext.canvas);
-      const canvasCssHeight = getCanvasCssHeight(gpuContext.canvas);
-      if (canvasCssWidth <= 0 || canvasCssHeight <= 0) return;
-
-      // Calculate offsets (only for HTMLCanvasElement with DOM)
-      const offsetX = canvas.offsetLeft;
-      const offsetY = canvas.offsetTop;
-
-      const plotLeftCss = clipXToCanvasCssPx(plotClipRect.left, canvasCssWidth);
-      const plotRightCss = clipXToCanvasCssPx(plotClipRect.right, canvasCssWidth);
-      const plotTopCss = clipYToCanvasCssPx(plotClipRect.top, canvasCssHeight);
-      const plotBottomCss = clipYToCanvasCssPx(plotClipRect.bottom, canvasCssHeight);
-
-      // Clear axis label overlay if it exists
-      axisLabelOverlay?.clear();
-
-      const xTickLengthCssPx = currentOptions.xAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const xLabelY = plotBottomCss + xTickLengthCssPx + LABEL_PADDING_CSS_PX + currentOptions.theme.fontSize * 0.5;
-      const isTimeXAxis = currentOptions.xAxis.type === 'time';
-      const xFormatter = (() => {
-        if (isTimeXAxis) return null;
-        const xDomainMin = finiteOrUndefined(currentOptions.xAxis.min) ?? xScale.invert(plotClipRect.left);
-        const xDomainMax = finiteOrUndefined(currentOptions.xAxis.max) ?? xScale.invert(plotClipRect.right);
-        const xTickStep = xTickCount === 1 ? 0 : (xDomainMax - xDomainMin) / (xTickCount - 1);
-        return createTickFormatter(xTickStep);
-      })();
-
-      for (let i = 0; i < xTickValues.length; i++) {
-        const v = xTickValues[i]!;
-        const xClip = xScale.scale(v);
-        const xCss = clipXToCanvasCssPx(xClip, canvasCssWidth);
-
-        const anchor: TextOverlayAnchor =
-          xTickValues.length === 1 ? 'middle' : i === 0 ? 'start' : i === xTickValues.length - 1 ? 'end' : 'middle';
-        const label = isTimeXAxis ? formatTimeTickValue(v, visibleXRangeMs) : formatTickValue(xFormatter!, v);
-        if (label == null) continue;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(label, offsetX + xCss, offsetY + xLabelY, {
-            fontSize: currentOptions.theme.fontSize,
-            color: currentOptions.theme.textColor,
-            anchor,
-          });
-          styleAxisLabelSpan(span, false, currentOptions.theme);
-        }
-      }
-
-      const yTickCount = DEFAULT_TICK_COUNT;
-      const yTickLengthCssPx = currentOptions.yAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const yDomainMin = finiteOrUndefined(currentOptions.yAxis.min) ?? yScale.invert(plotClipRect.bottom);
-      const yDomainMax = finiteOrUndefined(currentOptions.yAxis.max) ?? yScale.invert(plotClipRect.top);
-      const yTickStep = yTickCount === 1 ? 0 : (yDomainMax - yDomainMin) / (yTickCount - 1);
-      const yFormatter = createTickFormatter(yTickStep);
-      const yLabelX = plotLeftCss - yTickLengthCssPx - LABEL_PADDING_CSS_PX;
-      const ySpans: HTMLSpanElement[] = [];
-
-      for (let i = 0; i < yTickCount; i++) {
-        const t = yTickCount === 1 ? 0.5 : i / (yTickCount - 1);
-        const v = yDomainMin + t * (yDomainMax - yDomainMin);
-        const yClip = yScale.scale(v);
-        const yCss = clipYToCanvasCssPx(yClip, canvasCssHeight);
-
-        const label = formatTickValue(yFormatter, v);
-        if (label == null) continue;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(label, offsetX + yLabelX, offsetY + yCss, {
-            fontSize: currentOptions.theme.fontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'end',
-          });
-          styleAxisLabelSpan(span, false, currentOptions.theme);
-          ySpans.push(span);
-        }
-      }
-
-      const axisNameFontSize = getAxisTitleFontSize(currentOptions.theme.fontSize);
-
-      const xAxisName = currentOptions.xAxis.name?.trim() ?? '';
-      if (xAxisName.length > 0) {
-        const xCenter = (plotLeftCss + plotRightCss) / 2;
-        // Center title vertically between the tick labels and the zoom slider (when present).
-        // The zoom slider is an absolute-positioned overlay at the bottom of the canvas. We reserve
-        // additional `grid.bottom` space so tick labels stay visible above it.
-        //
-        // xLabelY is the vertical center of the tick labels; add half font size to approximate the
-        // tick-label "bottom edge" and then center the axis title within the remaining space.
-        const xTickLabelsBottom = xLabelY + currentOptions.theme.fontSize * 0.5;
-        const hasSliderZoom = currentOptions.dataZoom?.some((z) => z?.type === 'slider') ?? false;
-        const sliderTrackHeightCssPx = 32; // Keep in sync with ChartGPU/createDataZoomSlider defaults.
-        const bottomLimitCss = hasSliderZoom ? canvasCssHeight - sliderTrackHeightCssPx : canvasCssHeight;
-        const xTitleY = (xTickLabelsBottom + bottomLimitCss) / 2;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(xAxisName, offsetX + xCenter, offsetY + xTitleY, {
-            fontSize: axisNameFontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'middle',
-          });
-          styleAxisLabelSpan(span, true, currentOptions.theme);
-        }
-      }
-
-      const yAxisName = currentOptions.yAxis.name?.trim() ?? '';
-      if (yAxisName.length > 0) {
-        // Measure actual rendered label widths from DOM
-        const maxTickLabelWidth = ySpans.length === 0
-          ? 0
-          : ySpans.reduce((max, s) => Math.max(max, s.getBoundingClientRect().width), 0);
-
-        const yCenter = (plotTopCss + plotBottomCss) / 2;
-        const yTickLabelLeft = yLabelX - maxTickLabelWidth;
-        const yTitleX = yTickLabelLeft - LABEL_PADDING_CSS_PX - axisNameFontSize * 0.5;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(yAxisName, offsetX + yTitleX, offsetY + yCenter, {
-            fontSize: axisNameFontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'middle',
-            rotation: -90,
-          });
-          styleAxisLabelSpan(span, true, currentOptions.theme);
-        }
-      }
-    }
+    renderAxisLabels(axisLabelOverlay, overlayContainer, {
+      gpuContext,
+      currentOptions,
+      xScale,
+      yScale,
+      xTickValues,
+      plotClipRect,
+      visibleXRangeMs,
+    });
 
     // Generate annotation labels (DOM overlay).
     // PERFORMANCE: Reuse cached canvas dimensions from GPU overlay processing above

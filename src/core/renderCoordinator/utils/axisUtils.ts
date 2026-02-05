@@ -14,6 +14,7 @@ import type { ResolvedChartGPUOptions } from '../../../config/OptionResolver';
 import type { GridArea } from '../../../renderers/createGridRenderer';
 import { parseCssColorToRgba01 } from '../../../utils/colors';
 import { normalizeDomain } from './boundsComputation';
+import { clampInt } from './canvasUtils';
 
 /**
  * Computes grid area with margins and canvas dimensions for rendering layout.
@@ -140,17 +141,6 @@ export const computePlotClipRect = (
  * @returns Clamped value
  */
 export const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
-
-/**
- * Clamps integer to [lo, hi] range.
- * Converts to integer first using bitwise OR.
- *
- * @param v - Value to clamp
- * @param lo - Lower bound
- * @param hi - Upper bound
- * @returns Clamped integer value
- */
-export const clampInt = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v | 0));
 
 /**
  * Linear interpolation between two values with clamped t.
