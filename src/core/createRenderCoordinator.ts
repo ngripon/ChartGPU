@@ -1351,6 +1351,7 @@ export function createRenderCoordinator(
 
   // Prevent spamming console.warn for repeated misuse.
   const warnedPieAppendSeries = new Set<number>();
+  const warnedSamplingDefeatsFastPath = new Set<number>();
 
   // Coordinator-owned runtime series store (cartesian only).
   // - `runtimeRawDataByIndex[i]` owns a mutable array for streaming appends.
@@ -1718,12 +1719,10 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         
         // Optional fast-path: if the GPU buffer currently represents the full, unsampled line series,
         // we can append just the new points to the existing GPU buffer (no full re-upload).
-        if (
-          s.type === 'line' &&
-          s.sampling === 'none' &&
-          isFullSpanZoomBefore &&
-          gpuSeriesKindByIndex[seriesIndex] === 'fullRawLine'
-        ) {
+        const canUseFastPath =
+          s.type === 'line' && s.sampling === 'none' && isFullSpanZoomBefore && gpuSeriesKindByIndex[seriesIndex] === 'fullRawLine';
+
+        if (canUseFastPath) {
           try {
             dataStore.appendSeries(seriesIndex, dataPoints);
             appendedGpuThisFrame.add(seriesIndex);
@@ -1731,6 +1730,14 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
             // If the DataStore has not been initialized for this index (or any other error occurs),
             // fall back to the normal full upload path later in render().
           }
+        } else if (s.type === 'line' && s.sampling !== 'none' && !warnedSamplingDefeatsFastPath.has(seriesIndex)) {
+          // Warn users that sampling defeats the incremental append optimization
+          warnedSamplingDefeatsFastPath.add(seriesIndex);
+          console.warn(
+            `[ChartGPU] appendData() on series ${seriesIndex} with sampling='${s.sampling}' causes full buffer re-upload every frame. ` +
+              `For optimal streaming performance, use sampling='none'. ` +
+              `See docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md for details.`
+          );
         }
 
         raw.push(...dataPoints);
