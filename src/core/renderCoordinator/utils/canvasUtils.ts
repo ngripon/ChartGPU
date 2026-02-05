@@ -60,3 +60,15 @@ export function getCanvasCssSizeFromDevicePixels(
   // HTMLCanvasElement exposes `.width/.height` in device pixels.
   return { width: canvas.width / dpr, height: canvas.height / dpr };
 }
+
+/**
+ * Clamps a value to an integer within [lo, hi] range.
+ *
+ * @param v - Value to clamp
+ * @param lo - Lower bound (inclusive)
+ * @param hi - Upper bound (inclusive)
+ * @returns Clamped integer value
+ */
+export function clampInt(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v | 0));
+}
