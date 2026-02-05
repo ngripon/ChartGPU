@@ -11,7 +11,6 @@ import type {
   DataPoint,
   DataPointTuple,
   OHLCDataPoint,
-  OHLCDataPointTuple,
   PieCenter,
   PieRadius,
 } from '../config/types';
@@ -23,10 +22,10 @@ import {
   sliceVisibleRangeByX,
   sliceVisibleRangeByOHLC,
   findVisibleRangeIndicesByX,
-  isTupleDataArray as isTupleDataArrayImported,
   isTupleOHLCDataPoint as isTupleOHLCDataPointImported,
 } from './renderCoordinator/data/computeVisibleSlice';
 import { renderAxisLabels } from './renderCoordinator/render/renderAxisLabels';
+import { renderAnnotationLabels } from './renderCoordinator/render/renderAnnotationLabels';
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
@@ -60,7 +59,6 @@ import type { LinearScale } from '../utils/scales';
 import { parseCssColorToGPUColor, parseCssColorToRgba01 } from '../utils/colors';
 import { createTextOverlay } from '../components/createTextOverlay';
 import type { TextOverlay, TextOverlayAnchor } from '../components/createTextOverlay';
-import { getAxisTitleFontSize, styleAxisLabelSpan } from '../utils/axisLabelStyling';
 import { createLegend } from '../components/createLegend';
 import type { Legend } from '../components/createLegend';
 import { createTooltip } from '../components/createTooltip';
@@ -71,23 +69,6 @@ import { createAnimationController } from './createAnimationController';
 import type { AnimationId } from './createAnimationController';
 import { getEasing } from '../utils/easing';
 import type { EasingFunction } from '../utils/easing';
-
-/**
- * Internal type for annotation label data.
- */
-interface AnnotationLabelData {
-  readonly text: string;
-  readonly x: number;
-  readonly y: number;
-  readonly anchor?: 'start' | 'middle' | 'end';
-  readonly color?: string;
-  readonly fontSize?: number;
-  readonly background?: Readonly<{
-    readonly backgroundColor: string;
-    readonly padding?: readonly [number, number, number, number];
-    readonly borderRadius?: number;
-  }>;
-}
 
 export interface GPUContextLike {
   readonly device: GPUDevice | null;
@@ -108,15 +89,6 @@ function getCanvasCssWidth(canvas: HTMLCanvasElement | null): number {
   }
 
   return canvas.clientWidth;
-}
-
-/** Gets canvas CSS height - clientHeight for HTMLCanvasElement */
-function getCanvasCssHeight(canvas: HTMLCanvasElement | null): number {
-  if (!canvas) {
-    return 0;
-  }
-  
-  return canvas.clientHeight;
 }
 
 /**
@@ -204,8 +176,6 @@ type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number 
 
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_TICK_COUNT: number = 5;
-const DEFAULT_TICK_LENGTH_CSS_PX: number = 6;
-const LABEL_PADDING_CSS_PX = 4;
 const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
 const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
 
@@ -593,8 +563,7 @@ const computePlotScissorDevicePx = (
 const clipXToCanvasCssPx = (xClip: number, canvasCssWidth: number): number => ((xClip + 1) / 2) * canvasCssWidth;
 const clipYToCanvasCssPx = (yClip: number, canvasCssHeight: number): number => ((1 - yClip) / 2) * canvasCssHeight;
 
-// Aliases for imported functions to maintain compatibility with existing code
-const isTupleDataArray = isTupleDataArrayImported;
+// Alias for imported function to maintain compatibility with existing code
 const isTupleOHLCDataPoint = isTupleOHLCDataPointImported;
 
 const parseNumberOrPercent = (value: number | string, basis: number): number | null => {
@@ -654,41 +623,6 @@ const resolvePieRadiiCss = (
   const outer = parseNumberOrPercent(radius, maxRadiusCss);
   const outerCss = Math.max(0, Number.isFinite(outer) ? outer! : maxRadiusCss * 0.7);
   return { inner: 0, outer: Math.min(maxRadiusCss, outerCss) };
-};
-
-const DEFAULT_MAX_TICK_FRACTION_DIGITS = 6;
-
-const computeMaxFractionDigitsFromStep = (tickStep: number, cap: number = DEFAULT_MAX_TICK_FRACTION_DIGITS): number => {
-  const stepAbs = Math.abs(tickStep);
-  if (!Number.isFinite(stepAbs) || stepAbs === 0) return 0;
-
-  // Prefer “clean” decimal representations (e.g. 2.5, 0.25, 0.125) without relying on magnitude alone.
-  // We accept floating-point noise and cap the search to keep formatting reasonable.
-  for (let d = 0; d <= cap; d++) {
-    const scaled = stepAbs * 10 ** d;
-    const rounded = Math.round(scaled);
-    const err = Math.abs(scaled - rounded);
-    const tol = 1e-9 * Math.max(1, Math.abs(scaled));
-    if (err <= tol) return d;
-  }
-
-  // Fallback for repeating decimals (e.g. 1/3): show a small number of digits based on magnitude.
-  // The +1 nudges values like 0.333.. towards 2 decimals rather than 1.
-  return Math.max(0, Math.min(cap, Math.ceil(-Math.log10(stepAbs)) + 1));
-};
-
-const createTickFormatter = (tickStep: number): Intl.NumberFormat => {
-  const maximumFractionDigits = computeMaxFractionDigitsFromStep(tickStep);
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits });
-};
-
-const formatTickValue = (nf: Intl.NumberFormat, v: number): string | null => {
-  if (!Number.isFinite(v)) return null;
-  // Avoid displaying "-0" from floating-point artifacts.
-  const normalized = Math.abs(v) < 1e-12 ? 0 : v;
-  const formatted = nf.format(normalized);
-  // Guard against unexpected output like "NaN" even after the finite check (defensive).
-  return formatted === 'NaN' ? null : formatted;
 };
 
 const pad2 = (n: number): string => String(Math.trunc(n)).padStart(2, '0');
@@ -4019,237 +3953,19 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       visibleXRangeMs,
     });
 
-    // Generate annotation labels (DOM overlay).
-    // PERFORMANCE: Reuse cached canvas dimensions from GPU overlay processing above
-    const shouldUpdateAnnotationLabels = hasCartesianSeries && (annotationOverlay && overlayContainer);
-
-    if (shouldUpdateAnnotationLabels) {
-      // PERFORMANCE: Reuse canvasCssWidthForAnnotations and canvasCssHeightForAnnotations computed above
-      if (
-        canvas &&
-        canvasCssWidthForAnnotations > 0 &&
-        canvasCssHeightForAnnotations > 0 &&
-        plotWidthCss > 0 &&
-        plotHeightCss > 0
-      ) {
-        const offsetX = isHTMLCanvasElement(canvas) ? canvas.offsetLeft : 0;
-        const offsetY = isHTMLCanvasElement(canvas) ? canvas.offsetTop : 0;
-
-        annotationOverlay?.clear();
-
-        const toCssRgba = (color: string, opacity01: number): string => {
-          const base = parseCssColorToRgba01(color) ?? ([0, 0, 0, 1] as const);
-          const a = clamp01(base[3] * clamp01(opacity01));
-          const r = Math.round(clamp01(base[0]) * 255);
-          const g = Math.round(clamp01(base[1]) * 255);
-          const b = Math.round(clamp01(base[2]) * 255);
-          return `rgba(${r}, ${g}, ${b}, ${a})`;
-        };
-
-        const formatNumber = (n: number, decimals?: number): string => {
-          if (!Number.isFinite(n)) return '';
-          if (decimals == null) return String(n);
-          const d = Math.min(20, Math.max(0, Math.floor(decimals)));
-          return n.toFixed(d);
-        };
-
-        // PERFORMANCE: Cache regex pattern (compiled once per render, reused for all templates)
-        const templateRegex = /\{(x|y|value|name)\}/g;
-        const renderTemplate = (
-          template: string,
-          values: Readonly<{ x?: number; y?: number; value?: number; name?: string }>,
-          decimals?: number
-        ): string => {
-          // PERFORMANCE: Reset regex lastIndex to ensure consistent behavior
-          templateRegex.lastIndex = 0;
-          return template.replace(templateRegex, (_m, key) => {
-            if (key === 'name') return values.name ?? '';
-            const v = (values as any)[key] as number | undefined;
-            return v == null ? '' : formatNumber(v, decimals);
-          });
-        };
-
-        const mapAnchor = (anchor: 'start' | 'center' | 'end' | undefined): TextOverlayAnchor => {
-          switch (anchor) {
-            case 'center':
-              return 'middle';
-            case 'end':
-              return 'end';
-            case 'start':
-            default:
-              return 'start';
-          }
-        };
-
-        // PERFORMANCE: Skip label processing if no annotations
-        const annotations = currentOptions.annotations ?? [];
-        if (annotations.length === 0) {
-          // No annotations to process
-        } else {
-          const labelsOut: AnnotationLabelData[] = [];
-
-          for (let i = 0; i < annotations.length; i++) {
-            const a = annotations[i]!;
-
-            const labelCfg = a.label;
-            const wantsLabel = labelCfg != null || a.type === 'text';
-            if (!wantsLabel) continue;
-
-          // Compute anchor point (canvas-local CSS px).
-          let anchorXCss: number | null = null;
-          let anchorYCss: number | null = null;
-          let values: { x?: number; y?: number; value?: number; name?: string } = { name: a.id ?? '' };
-
-          switch (a.type) {
-            case 'lineX': {
-              const xClip = xScale.scale(a.x);
-              const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-              anchorXCss = xCss;
-              anchorYCss = plotTopCss;
-              values = { ...values, x: a.x, value: a.x };
-              break;
-            }
-            case 'lineY': {
-              const yClip = yScale.scale(a.y);
-              const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-              anchorXCss = plotLeftCss;
-              // Offset label 8px above the horizontal line (negative Y = upward)
-              anchorYCss = yCss - 8;
-              values = { ...values, y: a.y, value: a.y };
-              break;
-            }
-            case 'point': {
-              const xClip = xScale.scale(a.x);
-              const yClip = yScale.scale(a.y);
-              const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-              const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-              anchorXCss = xCss;
-              anchorYCss = yCss;
-              values = { ...values, x: a.x, y: a.y, value: a.y };
-              break;
-            }
-            case 'text': {
-              if (a.position.space === 'data') {
-                const xClip = xScale.scale(a.position.x);
-                const yClip = yScale.scale(a.position.y);
-                const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-                const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-                anchorXCss = xCss;
-                anchorYCss = yCss;
-                values = { ...values, x: a.position.x, y: a.position.y, value: a.position.y };
-              } else {
-                const xCss = plotLeftCss + a.position.x * plotWidthCss;
-                const yCss = plotTopCss + a.position.y * plotHeightCss;
-                anchorXCss = xCss;
-                anchorYCss = yCss;
-                values = { ...values, x: a.position.x, y: a.position.y, value: a.position.y };
-              }
-              break;
-            }
-            default:
-              assertUnreachable(a);
-          }
-
-          if (anchorXCss == null || anchorYCss == null || !Number.isFinite(anchorXCss) || !Number.isFinite(anchorYCss)) {
-            continue;
-          }
-
-          const dx = labelCfg?.offset?.[0] ?? 0;
-          const dy = labelCfg?.offset?.[1] ?? 0;
-          const x = anchorXCss + dx;
-          const y = anchorYCss + dy;
-
-          // Label text selection (explicit > template > defaults).
-          const text =
-            labelCfg?.text ??
-            (labelCfg?.template
-              ? renderTemplate(labelCfg.template, values, labelCfg.decimals)
-              : labelCfg
-                ? (() => {
-                    const defaultTemplate =
-                      a.type === 'lineX'
-                        ? 'x={x}'
-                        : a.type === 'lineY'
-                          ? 'y={y}'
-                          : a.type === 'point'
-                            ? '({x}, {y})'
-                            : a.type === 'text'
-                              ? a.text
-                              : '';
-                    return defaultTemplate.includes('{')
-                      ? renderTemplate(defaultTemplate, values, labelCfg.decimals)
-                      : defaultTemplate;
-                  })()
-                : a.type === 'text'
-                  ? a.text
-                  : '');
-
-          const trimmed = typeof text === 'string' ? text.trim() : '';
-          if (trimmed.length === 0) continue;
-
-          const anchor = mapAnchor(labelCfg?.anchor);
-          const color = a.style?.color ?? currentOptions.theme.textColor;
-          const fontSize = currentOptions.theme.fontSize;
-
-          const bg = labelCfg?.background;
-          const bgColor =
-            bg?.color != null ? toCssRgba(bg.color, bg.opacity ?? 1) : undefined;
-          const padding = (() => {
-            const p = bg?.padding;
-            if (typeof p === 'number' && Number.isFinite(p)) return [p, p, p, p] as const;
-            if (Array.isArray(p) && p.length === 4 && p.every((n) => typeof n === 'number' && Number.isFinite(n))) {
-              return [p[0], p[1], p[2], p[3]] as const;
-            }
-            return bg ? ([2, 4, 2, 4] as const) : undefined;
-          })();
-          const borderRadius =
-            typeof bg?.borderRadius === 'number' && Number.isFinite(bg.borderRadius) ? bg.borderRadius : undefined;
-
-          const labelData: AnnotationLabelData = {
-            text: trimmed,
-            x: offsetX + x,
-            y: offsetY + y,
-            anchor,
-            color,
-            fontSize,
-            ...(bgColor
-              ? {
-                  background: {
-                    backgroundColor: bgColor,
-                    ...(padding ? { padding } : {}),
-                    ...(borderRadius != null ? { borderRadius } : {}),
-                  },
-                }
-              : {}),
-          };
-
-          labelsOut.push(labelData);
-
-            if (annotationOverlay) {
-              const span = annotationOverlay.addLabel(trimmed, labelData.x, labelData.y, {
-                fontSize,
-                color,
-                anchor,
-              });
-              if (labelData.background) {
-                span.style.backgroundColor = labelData.background.backgroundColor;
-                span.style.display = 'inline-block';
-                span.style.boxSizing = 'border-box';
-                if (labelData.background.padding) {
-                  const [t, r, b, l] = labelData.background.padding;
-                  span.style.padding = `${t}px ${r}px ${b}px ${l}px`;
-                }
-                if (labelData.background.borderRadius != null) {
-                  span.style.borderRadius = `${labelData.background.borderRadius}px`;
-                }
-              }
-            }
-          }
-        }
-      } else {
-        annotationOverlay?.clear();
-      }
-    }
+    // Generate annotation labels (DOM overlay)
+    renderAnnotationLabels(annotationOverlay, overlayContainer, {
+      currentOptions,
+      xScale,
+      yScale,
+      canvasCssWidthForAnnotations,
+      canvasCssHeightForAnnotations,
+      plotLeftCss,
+      plotTopCss,
+      plotWidthCss,
+      plotHeightCss,
+      canvas,
+    });
   };
 
 
