@@ -26,6 +26,7 @@ import {
 } from './renderCoordinator/data/computeVisibleSlice';
 import { renderAxisLabels } from './renderCoordinator/render/renderAxisLabels';
 import { renderAnnotationLabels } from './renderCoordinator/render/renderAnnotationLabels';
+import { prepareOverlays } from './renderCoordinator/render/renderOverlays';
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
@@ -37,9 +38,7 @@ import { createScatterDensityRenderer } from '../renderers/createScatterDensityR
 import { createPieRenderer } from '../renderers/createPieRenderer';
 import { createCandlestickRenderer } from '../renderers/createCandlestickRenderer';
 import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
-import type { CrosshairRenderOptions } from '../renderers/createCrosshairRenderer';
 import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
-import type { HighlightPoint } from '../renderers/createHighlightRenderer';
 import { createRenderPipeline } from '../renderers/rendererUtils';
 import { createReferenceLineRenderer } from '../renderers/createReferenceLineRenderer';
 import type { ReferenceLineInstance } from '../renderers/createReferenceLineRenderer';
@@ -176,8 +175,6 @@ type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number 
 
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_TICK_COUNT: number = 5;
-const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
-const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
 
 // Story 6: time-axis label tiers + adaptive tick count (x-axis only).
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -3237,89 +3234,22 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
     }
 
-    gridRenderer.prepare(gridArea, { color: currentOptions.theme.gridLineColor });
-    if (hasCartesianSeries) {
-      xAxisRenderer.prepare(
-        currentOptions.xAxis,
+    // Prepare overlay renderers (grid, axes, crosshair, highlight)
+    prepareOverlays(
+      { gridRenderer, xAxisRenderer, yAxisRenderer, crosshairRenderer, highlightRenderer },
+      {
+        currentOptions,
         xScale,
-        'x',
-        gridArea,
-        currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor,
-        xTickCount
-      );
-      yAxisRenderer.prepare(
-        currentOptions.yAxis,
         yScale,
-        'y',
         gridArea,
-        currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor,
-        DEFAULT_TICK_COUNT
-      );
-    }
-
-    // Crosshair prepare uses canvas-local CSS px (EventManager payload x/y) and current gridArea.
-    if (effectivePointer.hasPointer && effectivePointer.isInGrid) {
-      const crosshairOptions: CrosshairRenderOptions = {
-        showX: true,
-        // Sync has no meaningful y, so avoid horizontal line.
-        showY: effectivePointer.source !== 'sync',
-        color: withAlpha(currentOptions.theme.axisLineColor, 0.6),
-        lineWidth: DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX,
-      };
-      crosshairRenderer.prepare(effectivePointer.x, effectivePointer.y, gridArea, crosshairOptions);
-      crosshairRenderer.setVisible(true);
-    } else {
-      crosshairRenderer.setVisible(false);
-    }
-
-    // Highlight: on hover, find nearest point and draw a ring highlight clipped to plot rect.
-    if (effectivePointer.source === 'mouse' && effectivePointer.hasPointer && effectivePointer.isInGrid) {
-      if (interactionScales) {
-        // findNearestPoint handles visibility filtering internally and returns correct series indices
-        const match = findNearestPoint(
-          seriesForRender,
-          effectivePointer.gridX,
-          effectivePointer.gridY,
-          interactionScales.xScale,
-          interactionScales.yScale
-        );
-
-        if (match) {
-          const { x, y } = getPointXY(match.point);
-          const xGridCss = interactionScales.xScale.scale(x);
-          const yGridCss = interactionScales.yScale.scale(y);
-
-          if (Number.isFinite(xGridCss) && Number.isFinite(yGridCss)) {
-            const centerCssX = gridArea.left + xGridCss;
-            const centerCssY = gridArea.top + yGridCss;
-
-            const plotScissor = computePlotScissorDevicePx(gridArea);
-            const point: HighlightPoint = {
-              centerDeviceX: centerCssX * gridArea.devicePixelRatio,
-              centerDeviceY: centerCssY * gridArea.devicePixelRatio,
-              devicePixelRatio: gridArea.devicePixelRatio,
-              canvasWidth: gridArea.canvasWidth,
-              canvasHeight: gridArea.canvasHeight,
-              scissor: plotScissor,
-            };
-
-            const seriesColor = currentOptions.series[match.seriesIndex]?.color ?? '#888';
-            highlightRenderer.prepare(point, seriesColor, DEFAULT_HIGHLIGHT_SIZE_CSS_PX);
-            highlightRenderer.setVisible(true);
-          } else {
-            highlightRenderer.setVisible(false);
-          }
-        } else {
-          highlightRenderer.setVisible(false);
-        }
-      } else {
-        highlightRenderer.setVisible(false);
+        xTickCount,
+        hasCartesianSeries,
+        effectivePointer,
+        interactionScales,
+        seriesForRender,
+        withAlpha,
       }
-    } else {
-      highlightRenderer.setVisible(false);
-    }
+    );
 
     // Tooltip: on hover, find matches and render tooltip near cursor.
     // Note: Tooltips require HTMLCanvasElement (DOM-specific positioning).
