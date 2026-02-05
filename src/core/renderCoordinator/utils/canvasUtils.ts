@@ -1,0 +1,62 @@
+/**
+ * Canvas sizing and measurement utilities for the RenderCoordinator.
+ *
+ * These pure functions handle canvas dimension retrieval with special handling
+ * for device pixel ratio and GPU overlay coordinate conversions.
+ *
+ * @module canvasUtils
+ */
+
+/**
+ * Gets canvas CSS width - clientWidth for HTMLCanvasElement.
+ *
+ * @param canvas - The canvas element to measure, or null
+ * @returns CSS width in pixels, or 0 if canvas is null
+ */
+export function getCanvasCssWidth(canvas: HTMLCanvasElement | null): number {
+  if (!canvas) {
+    return 0;
+  }
+
+  return canvas.clientWidth;
+}
+
+/**
+ * Gets canvas CSS height - clientHeight for HTMLCanvasElement.
+ *
+ * @param canvas - The canvas element to measure, or null
+ * @returns CSS height in pixels, or 0 if canvas is null
+ */
+export function getCanvasCssHeight(canvas: HTMLCanvasElement | null): number {
+  if (!canvas) {
+    return 0;
+  }
+
+  return canvas.clientHeight;
+}
+
+/**
+ * Gets canvas CSS size derived strictly from device-pixel dimensions and DPR.
+ *
+ * This is intentionally different from `getCanvasCssWidth/Height(...)`:
+ * - HTMLCanvasElement: `clientWidth/clientHeight` reflect DOM layout and can diverge (rounding, zoom, async resize)
+ *   from the WebGPU render target size (`canvas.width/height` in device pixels).
+ * - For GPU overlays that round-trip CSS↔device pixels in-shader, we must derive CSS size from
+ *   `canvas.width/height` + DPR to keep transforms consistent with the render target.
+ *
+ * NOTE: Use this for GPU overlay coordinate conversion only (reference lines, markers).
+ * Keep DOM overlays (labels/tooltips) using `clientWidth/clientHeight` for layout correctness.
+ *
+ * @param canvas - The canvas element to measure, or null
+ * @param devicePixelRatio - The device pixel ratio (defaults to window.devicePixelRatio or 1)
+ * @returns Object with width and height in CSS pixels derived from device pixels
+ */
+export function getCanvasCssSizeFromDevicePixels(
+  canvas: HTMLCanvasElement | null,
+  devicePixelRatio: number = typeof window !== 'undefined' ? window.devicePixelRatio : 1,
+): Readonly<{ width: number; height: number }> {
+  if (!canvas) return { width: 0, height: 0 };
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  // HTMLCanvasElement exposes `.width/.height` in device pixels.
+  return { width: canvas.width / dpr, height: canvas.height / dpr };
+}
