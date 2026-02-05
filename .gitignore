@@ -3,6 +3,7 @@ node_modules/
 
 # Cursor
 .cursor/
+.claude/
 # Build output
 dist/
 examples/dist/

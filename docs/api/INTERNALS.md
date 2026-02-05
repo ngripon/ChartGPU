@@ -198,7 +198,7 @@ A standalone internal DOM helper for rendering a slider-style x-zoom UI. See [`c
 
 ## Render coordinator (internal / contributor notes)
 
-A small orchestration layer for "resolved options → render pass submission".
+A modular orchestration layer for "resolved options → render pass submission". Originally a monolithic 4,806-line file, the render coordinator has been refactored into a maintainable modular architecture (3,799 lines in main file, with 11 specialized modules totaling ~3,300 lines).
 
 See [render-coordinator-summary.md](render-coordinator-summary.md) for the essential public interfaces (`GPUContextLike`, `RenderCoordinator`, `RenderCoordinatorCallbacks`) and factory function signature. For complete implementation details, see [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
 
@@ -230,6 +230,86 @@ See [render-coordinator-summary.md](render-coordinator-summary.md) for the essen
   - Grid lines use `resolvedOptions.theme.gridLineColor`.
   - Axes use `resolvedOptions.theme.axisLineColor` (baseline) and `resolvedOptions.theme.axisTickColor` (ticks).
   - Axis tick value labels are rendered as DOM text (via the internal [text overlay](#text-overlay-internal--contributor-notes)) and styled using `resolvedOptions.theme.textColor`, `resolvedOptions.theme.fontSize`, and `resolvedOptions.theme.fontFamily` (see [`ThemeConfig`](../../src/themes/types.ts)).
+
+### Modular Architecture (Refactoring Complete)
+
+The render coordinator has been systematically refactored into a modular architecture for improved maintainability. The modules are organized under `src/core/renderCoordinator/` and are intentionally not exported from the public API.
+
+**Core modules:**
+
+1. **`utils/`** - Pure utility functions
+   - `canvasUtils.ts` (67 lines) - Canvas sizing and coordinate transformations
+   - `dataPointUtils.ts` (89 lines) - Type guards for data point formats (tuple/object)
+   - `boundsComputation.ts` (286 lines) - Domain bounds calculation from series data
+   - `axisUtils.ts` (230 lines) - Coordinate space transformations (clip ↔ CSS ↔ domain)
+   - `timeAxisUtils.ts` (342 lines) - Time formatting and adaptive tick generation
+
+2. **`gpu/`** - GPU resource management
+   - `textureManager.ts` (256 lines) - Lazy texture allocation, MSAA overlay management, blit pipeline for multi-pass rendering
+
+3. **`renderers/`** - Renderer lifecycle
+   - `rendererPool.ts` (303 lines) - Dynamic renderer array sizing, lazy instantiation, per-chart-type pools
+
+4. **`data/`** - Data transformation pipeline
+   - `computeVisibleSlice.ts` (365 lines) - Visible range slicing with binary search optimization and WeakMap caching
+
+5. **`zoom/`** - Zoom state utilities
+   - `zoomHelpers.ts` (210 lines) - Percent-space ↔ domain conversions, visible domain calculations
+
+6. **`animation/`** - Animation system
+   - `animationHelpers.ts` (319 lines) - Animation config resolution, easing, data interpolation
+
+7. **`interaction/`** - Pointer and hit-testing
+   - `interactionHelpers.ts` (341 lines) - Pointer state management, coordinate transformations, listener management
+
+8. **`ui/`** - UI component helpers
+   - `tooltipLegendHelpers.ts` (205 lines) - Tooltip caching, candlestick positioning
+
+9. **`axis/`** - Axis rendering utilities
+   - `computeAxisTicks.ts` (106 lines) - Tick generation and number formatting
+   - `axisLabelHelpers.ts` (145 lines) - Label positioning and title layout calculations
+
+10. **`annotations/`** - Annotation processing
+    - `processAnnotations.ts` (434 lines) - Annotation GPU processing and DOM label generation
+
+11. **`render/`** - Render method decomposition (Phase 11)
+    - `renderAxisLabels.ts` (202 lines) - DOM-based axis label generation and positioning
+    - `renderAnnotationLabels.ts` (316 lines) - DOM-based annotation label generation with template support
+    - `renderOverlays.ts` (204 lines) - Overlay preparation (grid, axes, crosshair, highlight)
+    - `renderSeries.ts` (469 lines) - All series rendering (area, line, bar, scatter, pie, candlestick)
+
+**Total reduction:** 1,007 lines extracted from main file (4,806 → 3,799 lines, 20.9% reduction)
+
+**Module patterns:**
+
+- **Pure functions**: All utilities are pure functions with explicit dependencies via parameters
+- **Type safety**: Full TypeScript types with no `any`
+- **Testability**: Each module has comprehensive unit tests (378 tests total)
+- **No side effects**: Modules don't access global state or DOM (except render modules)
+- **Coordinate system clarity**: Functions document which coordinate space they operate in (CSS pixels, device pixels, clip space, domain space)
+
+**Render pipeline flow:**
+
+The `render()` method orchestrates the following phases using the modular architecture:
+
+1. **Layout computation** (`canvasUtils`) - Calculate `GridArea` from canvas size and margins
+2. **Bounds computation** (`boundsComputation`) - Derive domain bounds from visible series data
+3. **Scale creation** (`axisUtils`) - Build clip-space scales for rendering
+4. **Data transformation** (`computeVisibleSlice`) - Slice visible data range with binary search
+5. **Animation** (`animationHelpers`) - Interpolate data during animations
+6. **Texture management** (`textureManager`) - Allocate/reallocate GPU textures as needed
+7. **Renderer pool** (`rendererPool`) - Ensure renderer arrays match series counts
+8. **Series rendering** (`renderSeries`) - Render all chart types (area, line, bar, scatter, pie, candlestick)
+9. **Overlay rendering** (`renderOverlays`) - Render grid, axes, crosshair, highlight
+10. **Annotation processing** (`processAnnotations`) - Process annotations for GPU rendering
+11. **Label rendering** (`renderAxisLabels`, `renderAnnotationLabels`) - Generate DOM labels
+
+**Implementation notes:**
+
+- Modules are imported as namespaced groups (e.g., `import * as Utils from './renderCoordinator/utils'`)
+- Main coordinator file retains orchestration logic, state management, and lifecycle
+- Data store, sampling coordination, and cache management remain in coordinator due to tight coupling
+- All coordinate transformations document their input/output spaces to prevent coordinate system bugs
 
 ## DOM Overlay Separation (No-DOM mode)
 

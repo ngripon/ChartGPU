@@ -1,5 +1,4 @@
 import type {
-  ResolvedAreaSeriesConfig,
   ResolvedBarSeriesConfig,
   ResolvedCandlestickSeriesConfig,
   ResolvedChartGPUOptions,
@@ -11,7 +10,6 @@ import type {
   DataPoint,
   DataPointTuple,
   OHLCDataPoint,
-  OHLCDataPointTuple,
   PieCenter,
   PieRadius,
 } from '../config/types';
@@ -19,6 +17,21 @@ import { GPUContext, isHTMLCanvasElement as isHTMLCanvasElementGPU } from './GPU
 import { createDataStore } from '../data/createDataStore';
 import { sampleSeriesDataPoints } from '../data/sampleSeries';
 import { ohlcSample } from '../data/ohlcSample';
+import {
+  sliceVisibleRangeByX,
+  sliceVisibleRangeByOHLC,
+  isTupleOHLCDataPoint as isTupleOHLCDataPointImported,
+} from './renderCoordinator/data/computeVisibleSlice';
+import { renderAxisLabels } from './renderCoordinator/render/renderAxisLabels';
+import { renderAnnotationLabels } from './renderCoordinator/render/renderAnnotationLabels';
+import { prepareOverlays } from './renderCoordinator/render/renderOverlays';
+import { processAnnotations } from './renderCoordinator/annotations/processAnnotations';
+import {
+  prepareSeries,
+  encodeScatterDensityCompute,
+  renderSeries as renderSeriesPass,
+  renderAboveSeriesAnnotations,
+} from './renderCoordinator/render/renderSeries';
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
@@ -30,9 +43,7 @@ import { createScatterDensityRenderer } from '../renderers/createScatterDensityR
 import { createPieRenderer } from '../renderers/createPieRenderer';
 import { createCandlestickRenderer } from '../renderers/createCandlestickRenderer';
 import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
-import type { CrosshairRenderOptions } from '../renderers/createCrosshairRenderer';
 import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
-import type { HighlightPoint } from '../renderers/createHighlightRenderer';
 import { createRenderPipeline } from '../renderers/rendererUtils';
 import { createReferenceLineRenderer } from '../renderers/createReferenceLineRenderer';
 import type { ReferenceLineInstance } from '../renderers/createReferenceLineRenderer';
@@ -52,7 +63,6 @@ import type { LinearScale } from '../utils/scales';
 import { parseCssColorToGPUColor, parseCssColorToRgba01 } from '../utils/colors';
 import { createTextOverlay } from '../components/createTextOverlay';
 import type { TextOverlay, TextOverlayAnchor } from '../components/createTextOverlay';
-import { getAxisTitleFontSize, styleAxisLabelSpan } from '../utils/axisLabelStyling';
 import { createLegend } from '../components/createLegend';
 import type { Legend } from '../components/createLegend';
 import { createTooltip } from '../components/createTooltip';
@@ -63,23 +73,6 @@ import { createAnimationController } from './createAnimationController';
 import type { AnimationId } from './createAnimationController';
 import { getEasing } from '../utils/easing';
 import type { EasingFunction } from '../utils/easing';
-
-/**
- * Internal type for annotation label data.
- */
-interface AnnotationLabelData {
-  readonly text: string;
-  readonly x: number;
-  readonly y: number;
-  readonly anchor?: 'start' | 'middle' | 'end';
-  readonly color?: string;
-  readonly fontSize?: number;
-  readonly background?: Readonly<{
-    readonly backgroundColor: string;
-    readonly padding?: readonly [number, number, number, number];
-    readonly borderRadius?: number;
-  }>;
-}
 
 export interface GPUContextLike {
   readonly device: GPUDevice | null;
@@ -100,15 +93,6 @@ function getCanvasCssWidth(canvas: HTMLCanvasElement | null): number {
   }
 
   return canvas.clientWidth;
-}
-
-/** Gets canvas CSS height - clientHeight for HTMLCanvasElement */
-function getCanvasCssHeight(canvas: HTMLCanvasElement | null): number {
-  if (!canvas) {
-    return 0;
-  }
-  
-  return canvas.clientHeight;
 }
 
 /**
@@ -196,10 +180,6 @@ type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number 
 
 const DEFAULT_TARGET_FORMAT: GPUTextureFormat = 'bgra8unorm';
 const DEFAULT_TICK_COUNT: number = 5;
-const DEFAULT_TICK_LENGTH_CSS_PX: number = 6;
-const LABEL_PADDING_CSS_PX = 4;
-const DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX = 1;
-const DEFAULT_HIGHLIGHT_SIZE_CSS_PX = 4;
 
 // Story 6: time-axis label tiers + adaptive tick count (x-axis only).
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -585,286 +565,8 @@ const computePlotScissorDevicePx = (
 const clipXToCanvasCssPx = (xClip: number, canvasCssWidth: number): number => ((xClip + 1) / 2) * canvasCssWidth;
 const clipYToCanvasCssPx = (yClip: number, canvasCssHeight: number): number => ((1 - yClip) / 2) * canvasCssHeight;
 
-type TuplePoint = DataPointTuple;
-type ObjectPoint = Readonly<{ x: number; y: number; size?: number }>;
-
-const isTuplePoint = (p: DataPoint): p is TuplePoint => Array.isArray(p);
-const isTupleDataArray = (data: ReadonlyArray<DataPoint>): data is ReadonlyArray<TuplePoint> =>
-  data.length > 0 && isTuplePoint(data[0]!);
-
-// Cache monotonicity checks to avoid O(n) scans on every zoom operation.
-const monotonicXCache = new WeakMap<ReadonlyArray<DataPoint>, boolean>();
-
-const isMonotonicNonDecreasingFiniteX = (data: ReadonlyArray<DataPoint>, isTuple: boolean): boolean => {
-  const cached = monotonicXCache.get(data);
-  if (cached !== undefined) return cached;
-
-  let prevX = Number.NEGATIVE_INFINITY;
-
-  if (isTuple) {
-    const tupleData = data as ReadonlyArray<TuplePoint>;
-    for (let i = 0; i < tupleData.length; i++) {
-      const x = tupleData[i][0];
-      if (!Number.isFinite(x)) {
-        monotonicXCache.set(data, false);
-        return false;
-      }
-      if (x < prevX) {
-        monotonicXCache.set(data, false);
-        return false;
-      }
-      prevX = x;
-    }
-    monotonicXCache.set(data, true);
-    return true;
-  }
-
-  const objectData = data as ReadonlyArray<ObjectPoint>;
-  for (let i = 0; i < objectData.length; i++) {
-    const x = objectData[i].x;
-    if (!Number.isFinite(x)) {
-      monotonicXCache.set(data, false);
-      return false;
-    }
-    if (x < prevX) {
-      monotonicXCache.set(data, false);
-      return false;
-    }
-    prevX = x;
-  }
-  monotonicXCache.set(data, true);
-  return true;
-};
-
-const lowerBoundXTuple = (data: ReadonlyArray<TuplePoint>, xTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const x = data[mid][0];
-    if (x < xTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const upperBoundXTuple = (data: ReadonlyArray<TuplePoint>, xTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const x = data[mid][0];
-    if (x <= xTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const lowerBoundXObject = (data: ReadonlyArray<ObjectPoint>, xTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const x = data[mid].x;
-    if (x < xTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const upperBoundXObject = (data: ReadonlyArray<ObjectPoint>, xTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const x = data[mid].x;
-    if (x <= xTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const sliceVisibleRangeByX = (data: ReadonlyArray<DataPoint>, xMin: number, xMax: number): ReadonlyArray<DataPoint> => {
-  const n = data.length;
-  if (n === 0) return data;
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return data;
-
-  const isTuple = isTupleDataArray(data);
-  const canBinarySearch = isMonotonicNonDecreasingFiniteX(data, isTuple);
-
-  if (canBinarySearch) {
-    const lo = isTuple
-      ? lowerBoundXTuple(data as ReadonlyArray<TuplePoint>, xMin)
-      : lowerBoundXObject(data as ReadonlyArray<ObjectPoint>, xMin);
-    const hi = isTuple
-      ? upperBoundXTuple(data as ReadonlyArray<TuplePoint>, xMax)
-      : upperBoundXObject(data as ReadonlyArray<ObjectPoint>, xMax);
-
-    if (lo <= 0 && hi >= n) return data;
-    if (hi <= lo) return [];
-    return data.slice(lo, hi);
-  }
-
-  // Safe fallback: linear filter (preserves order, ignores non-finite x).
-  const out: DataPoint[] = [];
-  for (let i = 0; i < n; i++) {
-    const p = data[i]!;
-    const { x } = getPointXY(p);
-    if (!Number.isFinite(x)) continue;
-    if (x >= xMin && x <= xMax) out.push(p);
-  }
-  return out;
-};
-
-const findVisibleRangeIndicesByX = (
-  data: ReadonlyArray<DataPoint>,
-  xMin: number,
-  xMax: number
-): { readonly start: number; readonly end: number } => {
-  const n = data.length;
-  if (n === 0) return { start: 0, end: 0 };
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return { start: 0, end: n };
-
-  const isTuple = isTupleDataArray(data);
-  const canBinarySearch = isMonotonicNonDecreasingFiniteX(data, isTuple);
-  if (!canBinarySearch) {
-    // Data is not monotonic by x; we can't represent the visible set as a contiguous index range.
-    // Fall back to processing the full series for correctness.
-    return { start: 0, end: n };
-  }
-
-  const start = isTuple
-    ? lowerBoundXTuple(data as ReadonlyArray<TuplePoint>, xMin)
-    : lowerBoundXObject(data as ReadonlyArray<ObjectPoint>, xMin);
-  const end = isTuple
-    ? upperBoundXTuple(data as ReadonlyArray<TuplePoint>, xMax)
-    : upperBoundXObject(data as ReadonlyArray<ObjectPoint>, xMax);
-
-  const s = clampInt(start, 0, n);
-  const e = clampInt(end, 0, n);
-  return e <= s ? { start: s, end: s } : { start: s, end: e };
-};
-
-function isTupleOHLCDataPoint(p: OHLCDataPoint): p is OHLCDataPointTuple {
-  return Array.isArray(p);
-}
-
-// Cache monotonicity checks to avoid O(n) scans on every zoom operation.
-const monotonicTimestampCache = new WeakMap<ReadonlyArray<OHLCDataPoint>, boolean>();
-
-const isMonotonicNonDecreasingFiniteTimestamp = (data: ReadonlyArray<OHLCDataPoint>): boolean => {
-  const cached = monotonicTimestampCache.get(data);
-  if (cached !== undefined) return cached;
-
-  let prevTimestamp = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < data.length; i++) {
-    const p = data[i]!;
-    const timestamp = isTupleOHLCDataPoint(p) ? p[0] : p.timestamp;
-    if (!Number.isFinite(timestamp)) {
-      monotonicTimestampCache.set(data, false);
-      return false;
-    }
-    if (timestamp < prevTimestamp) {
-      monotonicTimestampCache.set(data, false);
-      return false;
-    }
-    prevTimestamp = timestamp;
-  }
-  monotonicTimestampCache.set(data, true);
-  return true;
-};
-
-const lowerBoundTimestampTuple = (data: ReadonlyArray<OHLCDataPointTuple>, timestampTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const timestamp = data[mid][0];
-    if (timestamp < timestampTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const upperBoundTimestampTuple = (data: ReadonlyArray<OHLCDataPointTuple>, timestampTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const timestamp = data[mid][0];
-    if (timestamp <= timestampTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-type OHLCObjectPoint = Readonly<{ timestamp: number; open: number; close: number; low: number; high: number }>;
-
-const lowerBoundTimestampObject = (data: ReadonlyArray<OHLCObjectPoint>, timestampTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const timestamp = data[mid].timestamp;
-    if (timestamp < timestampTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-const upperBoundTimestampObject = (data: ReadonlyArray<OHLCObjectPoint>, timestampTarget: number): number => {
-  let lo = 0;
-  let hi = data.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    const timestamp = data[mid].timestamp;
-    if (timestamp <= timestampTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-};
-
-/**
- * Slices OHLC/candlestick data to the visible timestamp range [xMin, xMax].
- *
- * Uses binary search when timestamps are sorted ascending; otherwise falls back to linear scan.
- */
-const sliceVisibleRangeByOHLC = (
-  data: ReadonlyArray<OHLCDataPoint>,
-  xMin: number,
-  xMax: number
-): ReadonlyArray<OHLCDataPoint> => {
-  const n = data.length;
-  if (n === 0) return data;
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return data;
-
-  const canBinarySearch = isMonotonicNonDecreasingFiniteTimestamp(data);
-  const isTuple = n > 0 && isTupleOHLCDataPoint(data[0]!);
-
-  if (canBinarySearch) {
-    const lo = isTuple
-      ? lowerBoundTimestampTuple(data as ReadonlyArray<OHLCDataPointTuple>, xMin)
-      : lowerBoundTimestampObject(data as ReadonlyArray<OHLCObjectPoint>, xMin);
-    const hi = isTuple
-      ? upperBoundTimestampTuple(data as ReadonlyArray<OHLCDataPointTuple>, xMax)
-      : upperBoundTimestampObject(data as ReadonlyArray<OHLCObjectPoint>, xMax);
-
-    if (lo <= 0 && hi >= n) return data;
-    if (hi <= lo) return [];
-    return data.slice(lo, hi);
-  }
-
-  // Safe fallback: linear filter (preserves order, ignores non-finite timestamp).
-  const out: OHLCDataPoint[] = [];
-  for (let i = 0; i < n; i++) {
-    const p = data[i]!;
-    const timestamp = isTupleOHLCDataPoint(p) ? p[0] : p.timestamp;
-    if (!Number.isFinite(timestamp)) continue;
-    if (timestamp >= xMin && timestamp <= xMax) out.push(p);
-  }
-  return out;
-};
+// Alias for imported function to maintain compatibility with existing code
+const isTupleOHLCDataPoint = isTupleOHLCDataPointImported;
 
 const parseNumberOrPercent = (value: number | string, basis: number): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -923,41 +625,6 @@ const resolvePieRadiiCss = (
   const outer = parseNumberOrPercent(radius, maxRadiusCss);
   const outerCss = Math.max(0, Number.isFinite(outer) ? outer! : maxRadiusCss * 0.7);
   return { inner: 0, outer: Math.min(maxRadiusCss, outerCss) };
-};
-
-const DEFAULT_MAX_TICK_FRACTION_DIGITS = 6;
-
-const computeMaxFractionDigitsFromStep = (tickStep: number, cap: number = DEFAULT_MAX_TICK_FRACTION_DIGITS): number => {
-  const stepAbs = Math.abs(tickStep);
-  if (!Number.isFinite(stepAbs) || stepAbs === 0) return 0;
-
-  // Prefer “clean” decimal representations (e.g. 2.5, 0.25, 0.125) without relying on magnitude alone.
-  // We accept floating-point noise and cap the search to keep formatting reasonable.
-  for (let d = 0; d <= cap; d++) {
-    const scaled = stepAbs * 10 ** d;
-    const rounded = Math.round(scaled);
-    const err = Math.abs(scaled - rounded);
-    const tol = 1e-9 * Math.max(1, Math.abs(scaled));
-    if (err <= tol) return d;
-  }
-
-  // Fallback for repeating decimals (e.g. 1/3): show a small number of digits based on magnitude.
-  // The +1 nudges values like 0.333.. towards 2 decimals rather than 1.
-  return Math.max(0, Math.min(cap, Math.ceil(-Math.log10(stepAbs)) + 1));
-};
-
-const createTickFormatter = (tickStep: number): Intl.NumberFormat => {
-  const maximumFractionDigits = computeMaxFractionDigitsFromStep(tickStep);
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits });
-};
-
-const formatTickValue = (nf: Intl.NumberFormat, v: number): string | null => {
-  if (!Number.isFinite(v)) return null;
-  // Avoid displaying "-0" from floating-point artifacts.
-  const normalized = Math.abs(v) < 1e-12 ? 0 : v;
-  const formatted = nf.format(normalized);
-  // Guard against unexpected output like "NaN" even after the finite check (defensive).
-  return formatted === 'NaN' ? null : formatted;
 };
 
 const pad2 = (n: number): string => String(Math.trunc(n)).padStart(2, '0');
@@ -1527,12 +1194,6 @@ export function createRenderCoordinator(
     updateInterpolationCaches.cartesianDataBySeriesIndex.length = 0;
     updateInterpolationCaches.pieDataBySeriesIndex.length = 0;
   };
-
-  // PERFORMANCE: Reusable arrays for annotation processing (avoid allocations per frame)
-  const annotationLineBelow: ReferenceLineInstance[] = [];
-  const annotationLineAbove: ReferenceLineInstance[] = [];
-  const annotationMarkerBelow: AnnotationMarkerInstance[] = [];
-  const annotationMarkerAbove: AnnotationMarkerInstance[] = [];
 
   const interpolateCartesianSeriesDataByIndex = (
     fromData: ReadonlyArray<DataPoint>,
@@ -3236,25 +2897,6 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     scheduleFlush();
   };
 
-  const shouldRenderArea = (series: ResolvedChartGPUOptions['series'][number]): boolean => {
-    switch (series.type) {
-      case 'area':
-        return true;
-      case 'line':
-        return series.areaStyle != null;
-      case 'bar':
-        return false;
-      case 'scatter':
-        return false;
-      case 'pie':
-        return false;
-      case 'candlestick':
-        return false;
-      default:
-        return assertUnreachable(series);
-    }
-  };
-
   const render: RenderCoordinator['render'] = () => {
     assertNotDisposed();
     if (!gpuContext.canvasContext || !gpuContext.canvas) return;
@@ -3388,104 +3030,38 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const plotWidthCss = Math.max(0, plotRightCss - plotLeftCss);
     const plotHeightCss = Math.max(0, plotBottomCss - plotTopCss);
 
-    const resolveAnnotationRgba = (color: string | undefined, opacity: number | undefined): readonly [number, number, number, number] => {
-      const base =
-        parseCssColorToRgba01(color ?? currentOptions.theme.textColor) ??
-        parseCssColorToRgba01(currentOptions.theme.textColor) ??
-        ([1, 1, 1, 1] as const);
-      const o = opacity == null ? 1 : clamp01(opacity);
-      return [clamp01(base[0]), clamp01(base[1]), clamp01(base[2]), clamp01(base[3] * o)] as const;
-    };
-
+    // Process annotations (convert to GPU instances for rendering)
     const annotations: ReadonlyArray<AnnotationConfig> = hasCartesianSeries ? (currentOptions.annotations ?? []) : [];
+    const annotationResult = processAnnotations({
+      annotations,
+      xScale,
+      yScale,
+      plotBounds: {
+        leftCss: plotLeftCss,
+        rightCss: plotRightCss,
+        topCss: plotTopCss,
+        bottomCss: plotBottomCss,
+        widthCss: plotWidthCss,
+        heightCss: plotHeightCss,
+      },
+      canvasCssWidth: canvasCssWidthForAnnotations,
+      canvasCssHeight: canvasCssHeightForAnnotations,
+      theme: currentOptions.theme,
+    });
 
-    // PERFORMANCE: Reuse arrays from previous frame (clear and reuse to avoid allocations)
-    annotationLineBelow.length = 0;
-    annotationLineAbove.length = 0;
-    annotationMarkerBelow.length = 0;
-    annotationMarkerAbove.length = 0;
-
-    // PERFORMANCE: Early exit if no annotations or invalid canvas dimensions
-    if (annotations.length > 0 && canvasCssWidthForAnnotations > 0 && canvasCssHeightForAnnotations > 0 && plotWidthCss > 0 && plotHeightCss > 0) {
-      for (let i = 0; i < annotations.length; i++) {
-        const a = annotations[i]!;
-        const layer = a.layer ?? 'aboveSeries';
-        const targetLines = layer === 'belowSeries' ? annotationLineBelow : annotationLineAbove;
-        const targetMarkers = layer === 'belowSeries' ? annotationMarkerBelow : annotationMarkerAbove;
-
-        const styleColor = a.style?.color;
-        const styleOpacity = a.style?.opacity;
-        const lineWidth = typeof a.style?.lineWidth === 'number' && Number.isFinite(a.style.lineWidth) ? Math.max(0, a.style.lineWidth) : 1;
-        const lineDash = a.style?.lineDash;
-        const rgba = resolveAnnotationRgba(styleColor, styleOpacity);
-
-        switch (a.type) {
-          case 'lineX': {
-            const xClip = xScale.scale(a.x);
-            const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-            if (!Number.isFinite(xCss)) break;
-            targetLines.push({
-              axis: 'vertical',
-              positionCssPx: xCss,
-              lineWidth,
-              lineDash,
-              rgba,
-            });
-            break;
-          }
-          case 'lineY': {
-            const yClip = yScale.scale(a.y);
-            const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-            if (!Number.isFinite(yCss)) break;
-            targetLines.push({
-              axis: 'horizontal',
-              positionCssPx: yCss,
-              lineWidth,
-              lineDash,
-              rgba,
-            });
-            break;
-          }
-          case 'point': {
-            const xClip = xScale.scale(a.x);
-            const yClip = yScale.scale(a.y);
-            const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-            const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-            if (!Number.isFinite(xCss) || !Number.isFinite(yCss)) break;
-
-            const markerSize =
-              typeof a.marker?.size === 'number' && Number.isFinite(a.marker.size) ? Math.max(1, a.marker.size) : 6;
-            const markerColor = a.marker?.style?.color ?? a.style?.color;
-            const markerOpacity = a.marker?.style?.opacity ?? a.style?.opacity;
-            const fillRgba = resolveAnnotationRgba(markerColor, markerOpacity);
-
-            targetMarkers.push({
-              xCssPx: xCss,
-              yCssPx: yCss,
-              sizeCssPx: markerSize,
-              fillRgba,
-            });
-            break;
-          }
-          case 'text': {
-            // Text annotations are handled via DOM overlays / callbacks (labels), not GPU.
-            break;
-          }
-          default:
-            assertUnreachable(a);
-        }
-      }
-    }
-
-    // PERFORMANCE: Use array references directly instead of spreading (avoids allocation)
+    // Extract annotation instances for GPU rendering
     const combinedReferenceLines: ReadonlyArray<ReferenceLineInstance> =
-      annotationLineBelow.length + annotationLineAbove.length > 0 ? [...annotationLineBelow, ...annotationLineAbove] : [];
+      annotationResult.linesBelow.length + annotationResult.linesAbove.length > 0
+        ? [...annotationResult.linesBelow, ...annotationResult.linesAbove]
+        : [];
     const combinedMarkers: ReadonlyArray<AnnotationMarkerInstance> =
-      annotationMarkerBelow.length + annotationMarkerAbove.length > 0 ? [...annotationMarkerBelow, ...annotationMarkerAbove] : [];
-    const referenceLineBelowCount = annotationLineBelow.length;
-    const referenceLineAboveCount = annotationLineAbove.length;
-    const markerBelowCount = annotationMarkerBelow.length;
-    const markerAboveCount = annotationMarkerAbove.length;
+      annotationResult.markersBelow.length + annotationResult.markersAbove.length > 0
+        ? [...annotationResult.markersBelow, ...annotationResult.markersAbove]
+        : [];
+    const referenceLineBelowCount = annotationResult.linesBelow.length;
+    const referenceLineAboveCount = annotationResult.linesAbove.length;
+    const markerBelowCount = annotationResult.markersBelow.length;
+    const markerAboveCount = annotationResult.markersAbove.length;
 
     // Story 6: compute an x tick count that prevents label overlap (time axis only).
     // IMPORTANT: compute in CSS px, since labels are DOM elements in CSS px.
@@ -3572,89 +3148,22 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
     }
 
-    gridRenderer.prepare(gridArea, { color: currentOptions.theme.gridLineColor });
-    if (hasCartesianSeries) {
-      xAxisRenderer.prepare(
-        currentOptions.xAxis,
+    // Prepare overlay renderers (grid, axes, crosshair, highlight)
+    prepareOverlays(
+      { gridRenderer, xAxisRenderer, yAxisRenderer, crosshairRenderer, highlightRenderer },
+      {
+        currentOptions,
         xScale,
-        'x',
-        gridArea,
-        currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor,
-        xTickCount
-      );
-      yAxisRenderer.prepare(
-        currentOptions.yAxis,
         yScale,
-        'y',
         gridArea,
-        currentOptions.theme.axisLineColor,
-        currentOptions.theme.axisTickColor,
-        DEFAULT_TICK_COUNT
-      );
-    }
-
-    // Crosshair prepare uses canvas-local CSS px (EventManager payload x/y) and current gridArea.
-    if (effectivePointer.hasPointer && effectivePointer.isInGrid) {
-      const crosshairOptions: CrosshairRenderOptions = {
-        showX: true,
-        // Sync has no meaningful y, so avoid horizontal line.
-        showY: effectivePointer.source !== 'sync',
-        color: withAlpha(currentOptions.theme.axisLineColor, 0.6),
-        lineWidth: DEFAULT_CROSSHAIR_LINE_WIDTH_CSS_PX,
-      };
-      crosshairRenderer.prepare(effectivePointer.x, effectivePointer.y, gridArea, crosshairOptions);
-      crosshairRenderer.setVisible(true);
-    } else {
-      crosshairRenderer.setVisible(false);
-    }
-
-    // Highlight: on hover, find nearest point and draw a ring highlight clipped to plot rect.
-    if (effectivePointer.source === 'mouse' && effectivePointer.hasPointer && effectivePointer.isInGrid) {
-      if (interactionScales) {
-        // findNearestPoint handles visibility filtering internally and returns correct series indices
-        const match = findNearestPoint(
-          seriesForRender,
-          effectivePointer.gridX,
-          effectivePointer.gridY,
-          interactionScales.xScale,
-          interactionScales.yScale
-        );
-
-        if (match) {
-          const { x, y } = getPointXY(match.point);
-          const xGridCss = interactionScales.xScale.scale(x);
-          const yGridCss = interactionScales.yScale.scale(y);
-
-          if (Number.isFinite(xGridCss) && Number.isFinite(yGridCss)) {
-            const centerCssX = gridArea.left + xGridCss;
-            const centerCssY = gridArea.top + yGridCss;
-
-            const plotScissor = computePlotScissorDevicePx(gridArea);
-            const point: HighlightPoint = {
-              centerDeviceX: centerCssX * gridArea.devicePixelRatio,
-              centerDeviceY: centerCssY * gridArea.devicePixelRatio,
-              devicePixelRatio: gridArea.devicePixelRatio,
-              canvasWidth: gridArea.canvasWidth,
-              canvasHeight: gridArea.canvasHeight,
-              scissor: plotScissor,
-            };
-
-            const seriesColor = currentOptions.series[match.seriesIndex]?.color ?? '#888';
-            highlightRenderer.prepare(point, seriesColor, DEFAULT_HIGHLIGHT_SIZE_CSS_PX);
-            highlightRenderer.setVisible(true);
-          } else {
-            highlightRenderer.setVisible(false);
-          }
-        } else {
-          highlightRenderer.setVisible(false);
-        }
-      } else {
-        highlightRenderer.setVisible(false);
+        xTickCount,
+        hasCartesianSeries,
+        effectivePointer,
+        interactionScales,
+        seriesForRender,
+        withAlpha,
       }
-    } else {
-      highlightRenderer.setVisible(false);
-    }
+    );
 
     // Tooltip: on hover, find matches and render tooltip near cursor.
     // Note: Tooltips require HTMLCanvasElement (DOM-specific positioning).
@@ -3908,153 +3417,46 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
           hideTooltip();
         }
 
-    const defaultBaseline = currentOptions.yAxis.min ?? yBaseDomain.min;
-    const barSeriesConfigs: ResolvedBarSeriesConfig[] = [];
+    // Compute maxRadiusCss for pie intro animation
+    const plotSize = interactionScales ?? (canvas && isHTMLCanvasElement(canvas) ? getPlotSizeCssPx(canvas, gridArea) : null);
+    const maxRadiusCss =
+      plotSize && typeof plotSize.plotWidthCss === 'number' && typeof plotSize.plotHeightCss === 'number'
+        ? 0.5 * Math.min(plotSize.plotWidthCss, plotSize.plotHeightCss)
+        : 0;
 
-    const introP = introPhase === 'running' ? clamp01(introProgress01) : 1;
-
-    // Preparation loop: prepare ALL series (including hidden) to maintain correct indices
-    for (let i = 0; i < seriesForRender.length; i++) {
-      const s = seriesForRender[i];
-      switch (s.type) {
-        case 'area': {
-          const baseline = s.baseline ?? defaultBaseline;
-          areaRenderers[i].prepare(s, s.data, xScale, yScale, baseline);
-          break;
-        }
-        case 'line': {
-          // Always prepare the line stroke.
-          // If we already appended into the DataStore this frame (fast-path), avoid a full re-upload.
-          // For time axes (epoch-ms), subtract an x-origin before packing to Float32 to avoid precision loss
-          // (Float32 ulp at ~1e12 is ~2e5), which can manifest as stroke shimmer during zoom.
-          const xOffset = (() => {
-            if (currentOptions.xAxis.type !== 'time') return 0;
-            const d = s.data;
-            for (let k = 0; k < d.length; k++) {
-              const p = d[k]!;
-              const x = isTupleDataPoint(p) ? p[0] : p.x;
-              if (Number.isFinite(x)) return x;
-            }
-            return 0;
-          })();
-          if (!appendedGpuThisFrame.has(i)) {
-            dataStore.setSeries(i, s.data, { xOffset });
-          }
-          const buffer = dataStore.getSeriesBuffer(i);
-          lineRenderers[i].prepare(s, buffer, xScale, yScale, xOffset);
-
-          // Track the GPU buffer kind for future append fast-path decisions.
-          const zoomRange = zoomState?.getRange() ?? null;
-          const isFullSpanZoom =
-            zoomRange == null ||
-            (Number.isFinite(zoomRange.start) &&
-              Number.isFinite(zoomRange.end) &&
-              zoomRange.start <= 0 &&
-              zoomRange.end >= 100);
-          if (isFullSpanZoom && s.sampling === 'none') {
-            gpuSeriesKindByIndex[i] = 'fullRawLine';
-          } else {
-            gpuSeriesKindByIndex[i] = 'other';
-          }
-
-          // If `areaStyle` is provided on a line series, render a fill behind it.
-          if (s.areaStyle) {
-            const areaLike: ResolvedAreaSeriesConfig = {
-              type: 'area',
-              name: s.name,
-              rawData: s.data,
-              data: s.data,
-              color: s.areaStyle.color,
-              areaStyle: s.areaStyle,
-              sampling: s.sampling,
-              samplingThreshold: s.samplingThreshold,
-            };
-
-            areaRenderers[i].prepare(areaLike, areaLike.data, xScale, yScale, defaultBaseline);
-          }
-
-          break;
-        }
-        case 'bar': {
-          barSeriesConfigs.push(s);
-          break;
-        }
-        case 'scatter': {
-          // Scatter renderer sets/resets its own scissor. Animate intro via alpha fade.
-          if (s.mode === 'density') {
-            // Density mode bins raw (unsampled) data for correctness, but limits compute to the visible
-            // range when x is monotonic.
-            const rawData = s.rawData ?? s.data;
-            const visible = findVisibleRangeIndicesByX(rawData, visibleXDomain.min, visibleXDomain.max);
-
-            // Upload full raw data for compute. DataStore hashing makes this a cheap no-op when unchanged.
-            if (!appendedGpuThisFrame.has(i)) {
-              dataStore.setSeries(i, rawData);
-            }
-            const buffer = dataStore.getSeriesBuffer(i);
-            const pointCount = dataStore.getSeriesPointCount(i);
-
-            scatterDensityRenderers[i].prepare(
-              s,
-              buffer,
-              pointCount,
-              visible.start,
-              visible.end,
-              xScale,
-              yScale,
-              gridArea,
-              s.rawBounds
-            );
-            // Density mode keeps its own compute path; treat as non-fast-path for append heuristics.
-            gpuSeriesKindByIndex[i] = 'other';
-          } else {
-            const animated = introP < 1 ? ({ ...s, color: withAlpha(s.color, introP) } as const) : s;
-            scatterRenderers[i].prepare(animated, s.data, xScale, yScale, gridArea);
-          }
-          break;
-        }
-        case 'pie': {
-          // Pie renderer sets/resets its own scissor. Animate intro via radius scale (CSS px).
-          if (introP < 1) {
-            const canvas = gpuContext.canvas;
-            const plotWidthCss = interactionScales?.plotWidthCss ?? (canvas && isHTMLCanvasElement(canvas) ? getPlotSizeCssPx(canvas, gridArea)?.plotWidthCss : null);
-            const plotHeightCss =
-              interactionScales?.plotHeightCss ?? (canvas && isHTMLCanvasElement(canvas) ? getPlotSizeCssPx(canvas, gridArea)?.plotHeightCss : null);
-            const maxRadiusCss =
-              typeof plotWidthCss === 'number' && typeof plotHeightCss === 'number'
-                ? 0.5 * Math.min(plotWidthCss, plotHeightCss)
-                : 0;
-
-            if (maxRadiusCss > 0) {
-              const radiiCss = resolvePieRadiiCss(s.radius, maxRadiusCss);
-              const inner = Math.max(0, radiiCss.inner) * introP;
-              const outer = Math.max(inner, radiiCss.outer) * introP;
-              const animated: ResolvedPieSeriesConfig = { ...s, radius: [inner, outer] as const };
-              pieRenderers[i].prepare(animated, gridArea);
-              break;
-            }
-          }
-          pieRenderers[i].prepare(s, gridArea);
-          break;
-        }
-        case 'candlestick': {
-          // Candlestick renderer handles clipping internally, no intro animation for now.
-          candlestickRenderers[i].prepare(s, s.data, xScale, yScale, gridArea, currentOptions.theme.backgroundColor);
-          break;
-        }
-        default:
-          assertUnreachable(s);
+    // Prepare all series renderers (area, line, bar, scatter, pie, candlestick)
+    const seriesPreparation = prepareSeries(
+      {
+        lineRenderers,
+        areaRenderers,
+        barRenderer,
+        scatterRenderers,
+        scatterDensityRenderers,
+        pieRenderers,
+        candlestickRenderers,
+      },
+      {
+        currentOptions,
+        seriesForRender,
+        xScale,
+        yScale,
+        gridArea,
+        dataStore,
+        appendedGpuThisFrame,
+        gpuSeriesKindByIndex,
+        zoomState,
+        visibleXDomain,
+        introPhase,
+        introProgress01,
+        withAlpha,
+        maxRadiusCss,
       }
-    }
+    );
 
-    // Filter series by visibility for rendering (after preparation)
-    const visibleSeriesForRender = seriesForRender
-      .map((s, i) => ({ series: s, originalIndex: i }))
-      .filter(({ series }) => series.visible !== false);
+    const { visibleBarSeriesConfigs } = seriesPreparation;
 
-    // Bars are prepared once and rendered via a single instanced draw call.
-    // Filter bar series by visibility before preparing renderer
-    const visibleBarSeriesConfigs = barSeriesConfigs.filter(s => s.visible !== false);
+    // Prepare bar renderer with animated scale if intro is running
+    const introP = introPhase === 'running' ? clamp01(introProgress01) : 1;
     const yScaleForBars = introP < 1 ? createAnimatedBarYScale(yScale, plotClipRect, visibleBarSeriesConfigs, introP) : yScale;
     barRenderer.prepare(visibleBarSeriesConfigs, dataStore, xScale, yScaleForBars, gridArea);
 
@@ -4102,12 +3504,11 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     const clearValue = parseCssColorToGPUColor(currentOptions.theme.backgroundColor, { r: 0, g: 0, b: 0, a: 1 });
 
     // Encode compute passes (scatter density) before the render pass.
-    for (let i = 0; i < seriesForRender.length; i++) {
-      const s = seriesForRender[i];
-      if (s.visible !== false && s.type === 'scatter' && s.mode === 'density') {
-        scatterDensityRenderers[i].encodeCompute(encoder);
-      }
-    }
+    encodeScatterDensityCompute(
+      { lineRenderers, areaRenderers, barRenderer, scatterRenderers, scatterDensityRenderers, pieRenderers, candlestickRenderers },
+      seriesForRender,
+      encoder
+    );
 
     const mainPass = encoder.beginRenderPass({
       label: 'renderCoordinator/mainPass',
@@ -4134,85 +3535,22 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       gridRenderer.render(mainPass);
     }
 
-    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
-      const { series, originalIndex } = visibleSeriesForRender[idx];
-      if (series.type === 'pie') {
-        pieRenderers[originalIndex].render(mainPass);
-      }
-    }
-
-    // Annotations (below series): clipped to plot scissor.
-    if (hasCartesianSeries && plotScissor.w > 0 && plotScissor.h > 0) {
-      const hasBelow = referenceLineBelowCount > 0 || markerBelowCount > 0;
-      if (hasBelow) {
-        mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-        if (referenceLineBelowCount > 0) {
-          referenceLineRenderer.render(mainPass, 0, referenceLineBelowCount);
-        }
-        if (markerBelowCount > 0) {
-          annotationMarkerRenderer.render(mainPass, 0, markerBelowCount);
-        }
-        mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-      }
-    }
-
-    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
-      const { series, originalIndex } = visibleSeriesForRender[idx];
-      if (shouldRenderArea(series)) {
-        // Line/area intro reveal: left-to-right plot scissor.
-        if (introP < 1) {
-          const w = clampInt(Math.floor(plotScissor.w * introP), 0, plotScissor.w);
-          if (w > 0 && plotScissor.h > 0) {
-            mainPass.setScissorRect(plotScissor.x, plotScissor.y, w, plotScissor.h);
-            areaRenderers[originalIndex].render(mainPass);
-            mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-          }
-        } else {
-          mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-          areaRenderers[originalIndex].render(mainPass);
-          mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-        }
-      }
-    }
-    // Clip bars to the plot grid (mirrors area/line scissor usage).
-    if (plotScissor.w > 0 && plotScissor.h > 0) {
-      mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-      barRenderer.render(mainPass);
-      mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-    }
-    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
-      const { series, originalIndex } = visibleSeriesForRender[idx];
-      if (series.type === 'candlestick') {
-        candlestickRenderers[originalIndex].render(mainPass);
-      }
-    }
-    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
-      const { series, originalIndex } = visibleSeriesForRender[idx];
-      if (series.type !== 'scatter') continue;
-      if (series.mode === 'density') {
-        scatterDensityRenderers[originalIndex].render(mainPass);
-      } else {
-        scatterRenderers[originalIndex].render(mainPass);
-      }
-    }
-    for (let idx = 0; idx < visibleSeriesForRender.length; idx++) {
-      const { series, originalIndex } = visibleSeriesForRender[idx];
-      if (series.type === 'line') {
-        // Line intro reveal: left-to-right plot scissor.
-        if (introP < 1) {
-          const w = clampInt(Math.floor(plotScissor.w * introP), 0, plotScissor.w);
-          if (w > 0 && plotScissor.h > 0) {
-            mainPass.setScissorRect(plotScissor.x, plotScissor.y, w, plotScissor.h);
-            lineRenderers[originalIndex].render(mainPass);
-            mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-          }
-        } else {
-          mainPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-          lineRenderers[originalIndex].render(mainPass);
-          mainPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
-        }
-      }
-    }
+    // Render all series to the main pass with proper layering
+    renderSeriesPass(
+      { lineRenderers, areaRenderers, barRenderer, scatterRenderers, scatterDensityRenderers, pieRenderers, candlestickRenderers },
+      { referenceLineRenderer, referenceLineRendererMsaa, annotationMarkerRenderer, annotationMarkerRendererMsaa },
+      {
+        hasCartesianSeries,
+        gridArea,
+        mainPass,
+        plotScissor,
+        introPhase,
+        introProgress01,
+        referenceLineBelowCount,
+        markerBelowCount,
+      },
+      seriesPreparation
+    );
 
     mainPass.end();
 
@@ -4234,22 +3572,20 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     overlayPass.setBindGroup(0, overlayBlitBindGroup!);
     overlayPass.draw(3);
 
-    // Annotations (above series): reference lines then markers, clipped to plot scissor.
-    if (hasCartesianSeries && plotScissor.w > 0 && plotScissor.h > 0) {
-      const hasAbove = referenceLineAboveCount > 0 || markerAboveCount > 0;
-      if (hasAbove) {
-        const firstLine = referenceLineBelowCount;
-        const firstMarker = markerBelowCount;
-        overlayPass.setScissorRect(plotScissor.x, plotScissor.y, plotScissor.w, plotScissor.h);
-        if (referenceLineAboveCount > 0) {
-          referenceLineRendererMsaa.render(overlayPass, firstLine, referenceLineAboveCount);
-        }
-        if (markerAboveCount > 0) {
-          annotationMarkerRendererMsaa.render(overlayPass, firstMarker, markerAboveCount);
-        }
-        overlayPass.setScissorRect(0, 0, gridArea.canvasWidth, gridArea.canvasHeight);
+    // Render above-series annotations to the overlay pass
+    renderAboveSeriesAnnotations(
+      { referenceLineRenderer, referenceLineRendererMsaa, annotationMarkerRenderer, annotationMarkerRendererMsaa },
+      {
+        hasCartesianSeries,
+        gridArea,
+        overlayPass,
+        plotScissor,
+        referenceLineBelowCount,
+        referenceLineAboveCount,
+        markerBelowCount,
+        markerAboveCount,
       }
-    }
+    );
 
     overlayPass.end();
 
@@ -4278,372 +3614,29 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     hasRenderedOnce = true;
 
     // Generate axis labels for DOM overlay
-    const shouldGenerateAxisLabels = hasCartesianSeries && (axisLabelOverlay && overlayContainer);
+    renderAxisLabels(axisLabelOverlay, overlayContainer, {
+      gpuContext,
+      currentOptions,
+      xScale,
+      yScale,
+      xTickValues,
+      plotClipRect,
+      visibleXRangeMs,
+    });
 
-    if (shouldGenerateAxisLabels) {
-
-      // Get canvas dimensions
-      const canvasCssWidth = getCanvasCssWidth(gpuContext.canvas);
-      const canvasCssHeight = getCanvasCssHeight(gpuContext.canvas);
-      if (canvasCssWidth <= 0 || canvasCssHeight <= 0) return;
-
-      // Calculate offsets (only for HTMLCanvasElement with DOM)
-      const offsetX = canvas.offsetLeft;
-      const offsetY = canvas.offsetTop;
-
-      const plotLeftCss = clipXToCanvasCssPx(plotClipRect.left, canvasCssWidth);
-      const plotRightCss = clipXToCanvasCssPx(plotClipRect.right, canvasCssWidth);
-      const plotTopCss = clipYToCanvasCssPx(plotClipRect.top, canvasCssHeight);
-      const plotBottomCss = clipYToCanvasCssPx(plotClipRect.bottom, canvasCssHeight);
-
-      // Clear axis label overlay if it exists
-      axisLabelOverlay?.clear();
-
-      const xTickLengthCssPx = currentOptions.xAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const xLabelY = plotBottomCss + xTickLengthCssPx + LABEL_PADDING_CSS_PX + currentOptions.theme.fontSize * 0.5;
-      const isTimeXAxis = currentOptions.xAxis.type === 'time';
-      const xFormatter = (() => {
-        if (isTimeXAxis) return null;
-        const xDomainMin = finiteOrUndefined(currentOptions.xAxis.min) ?? xScale.invert(plotClipRect.left);
-        const xDomainMax = finiteOrUndefined(currentOptions.xAxis.max) ?? xScale.invert(plotClipRect.right);
-        const xTickStep = xTickCount === 1 ? 0 : (xDomainMax - xDomainMin) / (xTickCount - 1);
-        return createTickFormatter(xTickStep);
-      })();
-
-      for (let i = 0; i < xTickValues.length; i++) {
-        const v = xTickValues[i]!;
-        const xClip = xScale.scale(v);
-        const xCss = clipXToCanvasCssPx(xClip, canvasCssWidth);
-
-        const anchor: TextOverlayAnchor =
-          xTickValues.length === 1 ? 'middle' : i === 0 ? 'start' : i === xTickValues.length - 1 ? 'end' : 'middle';
-        const label = isTimeXAxis ? formatTimeTickValue(v, visibleXRangeMs) : formatTickValue(xFormatter!, v);
-        if (label == null) continue;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(label, offsetX + xCss, offsetY + xLabelY, {
-            fontSize: currentOptions.theme.fontSize,
-            color: currentOptions.theme.textColor,
-            anchor,
-          });
-          styleAxisLabelSpan(span, false, currentOptions.theme);
-        }
-      }
-
-      const yTickCount = DEFAULT_TICK_COUNT;
-      const yTickLengthCssPx = currentOptions.yAxis.tickLength ?? DEFAULT_TICK_LENGTH_CSS_PX;
-      const yDomainMin = finiteOrUndefined(currentOptions.yAxis.min) ?? yScale.invert(plotClipRect.bottom);
-      const yDomainMax = finiteOrUndefined(currentOptions.yAxis.max) ?? yScale.invert(plotClipRect.top);
-      const yTickStep = yTickCount === 1 ? 0 : (yDomainMax - yDomainMin) / (yTickCount - 1);
-      const yFormatter = createTickFormatter(yTickStep);
-      const yLabelX = plotLeftCss - yTickLengthCssPx - LABEL_PADDING_CSS_PX;
-      const ySpans: HTMLSpanElement[] = [];
-
-      for (let i = 0; i < yTickCount; i++) {
-        const t = yTickCount === 1 ? 0.5 : i / (yTickCount - 1);
-        const v = yDomainMin + t * (yDomainMax - yDomainMin);
-        const yClip = yScale.scale(v);
-        const yCss = clipYToCanvasCssPx(yClip, canvasCssHeight);
-
-        const label = formatTickValue(yFormatter, v);
-        if (label == null) continue;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(label, offsetX + yLabelX, offsetY + yCss, {
-            fontSize: currentOptions.theme.fontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'end',
-          });
-          styleAxisLabelSpan(span, false, currentOptions.theme);
-          ySpans.push(span);
-        }
-      }
-
-      const axisNameFontSize = getAxisTitleFontSize(currentOptions.theme.fontSize);
-
-      const xAxisName = currentOptions.xAxis.name?.trim() ?? '';
-      if (xAxisName.length > 0) {
-        const xCenter = (plotLeftCss + plotRightCss) / 2;
-        // Center title vertically between the tick labels and the zoom slider (when present).
-        // The zoom slider is an absolute-positioned overlay at the bottom of the canvas. We reserve
-        // additional `grid.bottom` space so tick labels stay visible above it.
-        //
-        // xLabelY is the vertical center of the tick labels; add half font size to approximate the
-        // tick-label "bottom edge" and then center the axis title within the remaining space.
-        const xTickLabelsBottom = xLabelY + currentOptions.theme.fontSize * 0.5;
-        const hasSliderZoom = currentOptions.dataZoom?.some((z) => z?.type === 'slider') ?? false;
-        const sliderTrackHeightCssPx = 32; // Keep in sync with ChartGPU/createDataZoomSlider defaults.
-        const bottomLimitCss = hasSliderZoom ? canvasCssHeight - sliderTrackHeightCssPx : canvasCssHeight;
-        const xTitleY = (xTickLabelsBottom + bottomLimitCss) / 2;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(xAxisName, offsetX + xCenter, offsetY + xTitleY, {
-            fontSize: axisNameFontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'middle',
-          });
-          styleAxisLabelSpan(span, true, currentOptions.theme);
-        }
-      }
-
-      const yAxisName = currentOptions.yAxis.name?.trim() ?? '';
-      if (yAxisName.length > 0) {
-        // Measure actual rendered label widths from DOM
-        const maxTickLabelWidth = ySpans.length === 0
-          ? 0
-          : ySpans.reduce((max, s) => Math.max(max, s.getBoundingClientRect().width), 0);
-
-        const yCenter = (plotTopCss + plotBottomCss) / 2;
-        const yTickLabelLeft = yLabelX - maxTickLabelWidth;
-        const yTitleX = yTickLabelLeft - LABEL_PADDING_CSS_PX - axisNameFontSize * 0.5;
-
-        // Add to DOM overlay
-        if (axisLabelOverlay) {
-          const span = axisLabelOverlay.addLabel(yAxisName, offsetX + yTitleX, offsetY + yCenter, {
-            fontSize: axisNameFontSize,
-            color: currentOptions.theme.textColor,
-            anchor: 'middle',
-            rotation: -90,
-          });
-          styleAxisLabelSpan(span, true, currentOptions.theme);
-        }
-      }
-    }
-
-    // Generate annotation labels (DOM overlay).
-    // PERFORMANCE: Reuse cached canvas dimensions from GPU overlay processing above
-    const shouldUpdateAnnotationLabels = hasCartesianSeries && (annotationOverlay && overlayContainer);
-
-    if (shouldUpdateAnnotationLabels) {
-      // PERFORMANCE: Reuse canvasCssWidthForAnnotations and canvasCssHeightForAnnotations computed above
-      if (
-        canvas &&
-        canvasCssWidthForAnnotations > 0 &&
-        canvasCssHeightForAnnotations > 0 &&
-        plotWidthCss > 0 &&
-        plotHeightCss > 0
-      ) {
-        const offsetX = isHTMLCanvasElement(canvas) ? canvas.offsetLeft : 0;
-        const offsetY = isHTMLCanvasElement(canvas) ? canvas.offsetTop : 0;
-
-        annotationOverlay?.clear();
-
-        const toCssRgba = (color: string, opacity01: number): string => {
-          const base = parseCssColorToRgba01(color) ?? ([0, 0, 0, 1] as const);
-          const a = clamp01(base[3] * clamp01(opacity01));
-          const r = Math.round(clamp01(base[0]) * 255);
-          const g = Math.round(clamp01(base[1]) * 255);
-          const b = Math.round(clamp01(base[2]) * 255);
-          return `rgba(${r}, ${g}, ${b}, ${a})`;
-        };
-
-        const formatNumber = (n: number, decimals?: number): string => {
-          if (!Number.isFinite(n)) return '';
-          if (decimals == null) return String(n);
-          const d = Math.min(20, Math.max(0, Math.floor(decimals)));
-          return n.toFixed(d);
-        };
-
-        // PERFORMANCE: Cache regex pattern (compiled once per render, reused for all templates)
-        const templateRegex = /\{(x|y|value|name)\}/g;
-        const renderTemplate = (
-          template: string,
-          values: Readonly<{ x?: number; y?: number; value?: number; name?: string }>,
-          decimals?: number
-        ): string => {
-          // PERFORMANCE: Reset regex lastIndex to ensure consistent behavior
-          templateRegex.lastIndex = 0;
-          return template.replace(templateRegex, (_m, key) => {
-            if (key === 'name') return values.name ?? '';
-            const v = (values as any)[key] as number | undefined;
-            return v == null ? '' : formatNumber(v, decimals);
-          });
-        };
-
-        const mapAnchor = (anchor: 'start' | 'center' | 'end' | undefined): TextOverlayAnchor => {
-          switch (anchor) {
-            case 'center':
-              return 'middle';
-            case 'end':
-              return 'end';
-            case 'start':
-            default:
-              return 'start';
-          }
-        };
-
-        // PERFORMANCE: Skip label processing if no annotations
-        const annotations = currentOptions.annotations ?? [];
-        if (annotations.length === 0) {
-          // No annotations to process
-        } else {
-          const labelsOut: AnnotationLabelData[] = [];
-
-          for (let i = 0; i < annotations.length; i++) {
-            const a = annotations[i]!;
-
-            const labelCfg = a.label;
-            const wantsLabel = labelCfg != null || a.type === 'text';
-            if (!wantsLabel) continue;
-
-          // Compute anchor point (canvas-local CSS px).
-          let anchorXCss: number | null = null;
-          let anchorYCss: number | null = null;
-          let values: { x?: number; y?: number; value?: number; name?: string } = { name: a.id ?? '' };
-
-          switch (a.type) {
-            case 'lineX': {
-              const xClip = xScale.scale(a.x);
-              const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-              anchorXCss = xCss;
-              anchorYCss = plotTopCss;
-              values = { ...values, x: a.x, value: a.x };
-              break;
-            }
-            case 'lineY': {
-              const yClip = yScale.scale(a.y);
-              const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-              anchorXCss = plotLeftCss;
-              // Offset label 8px above the horizontal line (negative Y = upward)
-              anchorYCss = yCss - 8;
-              values = { ...values, y: a.y, value: a.y };
-              break;
-            }
-            case 'point': {
-              const xClip = xScale.scale(a.x);
-              const yClip = yScale.scale(a.y);
-              const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-              const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-              anchorXCss = xCss;
-              anchorYCss = yCss;
-              values = { ...values, x: a.x, y: a.y, value: a.y };
-              break;
-            }
-            case 'text': {
-              if (a.position.space === 'data') {
-                const xClip = xScale.scale(a.position.x);
-                const yClip = yScale.scale(a.position.y);
-                const xCss = clipXToCanvasCssPx(xClip, canvasCssWidthForAnnotations);
-                const yCss = clipYToCanvasCssPx(yClip, canvasCssHeightForAnnotations);
-                anchorXCss = xCss;
-                anchorYCss = yCss;
-                values = { ...values, x: a.position.x, y: a.position.y, value: a.position.y };
-              } else {
-                const xCss = plotLeftCss + a.position.x * plotWidthCss;
-                const yCss = plotTopCss + a.position.y * plotHeightCss;
-                anchorXCss = xCss;
-                anchorYCss = yCss;
-                values = { ...values, x: a.position.x, y: a.position.y, value: a.position.y };
-              }
-              break;
-            }
-            default:
-              assertUnreachable(a);
-          }
-
-          if (anchorXCss == null || anchorYCss == null || !Number.isFinite(anchorXCss) || !Number.isFinite(anchorYCss)) {
-            continue;
-          }
-
-          const dx = labelCfg?.offset?.[0] ?? 0;
-          const dy = labelCfg?.offset?.[1] ?? 0;
-          const x = anchorXCss + dx;
-          const y = anchorYCss + dy;
-
-          // Label text selection (explicit > template > defaults).
-          const text =
-            labelCfg?.text ??
-            (labelCfg?.template
-              ? renderTemplate(labelCfg.template, values, labelCfg.decimals)
-              : labelCfg
-                ? (() => {
-                    const defaultTemplate =
-                      a.type === 'lineX'
-                        ? 'x={x}'
-                        : a.type === 'lineY'
-                          ? 'y={y}'
-                          : a.type === 'point'
-                            ? '({x}, {y})'
-                            : a.type === 'text'
-                              ? a.text
-                              : '';
-                    return defaultTemplate.includes('{')
-                      ? renderTemplate(defaultTemplate, values, labelCfg.decimals)
-                      : defaultTemplate;
-                  })()
-                : a.type === 'text'
-                  ? a.text
-                  : '');
-
-          const trimmed = typeof text === 'string' ? text.trim() : '';
-          if (trimmed.length === 0) continue;
-
-          const anchor = mapAnchor(labelCfg?.anchor);
-          const color = a.style?.color ?? currentOptions.theme.textColor;
-          const fontSize = currentOptions.theme.fontSize;
-
-          const bg = labelCfg?.background;
-          const bgColor =
-            bg?.color != null ? toCssRgba(bg.color, bg.opacity ?? 1) : undefined;
-          const padding = (() => {
-            const p = bg?.padding;
-            if (typeof p === 'number' && Number.isFinite(p)) return [p, p, p, p] as const;
-            if (Array.isArray(p) && p.length === 4 && p.every((n) => typeof n === 'number' && Number.isFinite(n))) {
-              return [p[0], p[1], p[2], p[3]] as const;
-            }
-            return bg ? ([2, 4, 2, 4] as const) : undefined;
-          })();
-          const borderRadius =
-            typeof bg?.borderRadius === 'number' && Number.isFinite(bg.borderRadius) ? bg.borderRadius : undefined;
-
-          const labelData: AnnotationLabelData = {
-            text: trimmed,
-            x: offsetX + x,
-            y: offsetY + y,
-            anchor,
-            color,
-            fontSize,
-            ...(bgColor
-              ? {
-                  background: {
-                    backgroundColor: bgColor,
-                    ...(padding ? { padding } : {}),
-                    ...(borderRadius != null ? { borderRadius } : {}),
-                  },
-                }
-              : {}),
-          };
-
-          labelsOut.push(labelData);
-
-            if (annotationOverlay) {
-              const span = annotationOverlay.addLabel(trimmed, labelData.x, labelData.y, {
-                fontSize,
-                color,
-                anchor,
-              });
-              if (labelData.background) {
-                span.style.backgroundColor = labelData.background.backgroundColor;
-                span.style.display = 'inline-block';
-                span.style.boxSizing = 'border-box';
-                if (labelData.background.padding) {
-                  const [t, r, b, l] = labelData.background.padding;
-                  span.style.padding = `${t}px ${r}px ${b}px ${l}px`;
-                }
-                if (labelData.background.borderRadius != null) {
-                  span.style.borderRadius = `${labelData.background.borderRadius}px`;
-                }
-              }
-            }
-          }
-        }
-      } else {
-        annotationOverlay?.clear();
-      }
-    }
+    // Generate annotation labels (DOM overlay)
+    renderAnnotationLabels(annotationOverlay, overlayContainer, {
+      currentOptions,
+      xScale,
+      yScale,
+      canvasCssWidthForAnnotations,
+      canvasCssHeightForAnnotations,
+      plotLeftCss,
+      plotTopCss,
+      plotWidthCss,
+      plotHeightCss,
+      canvas,
+    });
   };
 
 

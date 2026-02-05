@@ -1,6 +1,8 @@
 # Render Coordinator Summary
 
-**⚠️ IMPORTANT FOR LLMs**: Use this summary instead of reading the full `createRenderCoordinator.ts` file (3852 lines). This document contains only the essential public interfaces and factory function signature needed for understanding the RenderCoordinator API.
+**⚠️ IMPORTANT FOR LLMs**: Use this summary instead of reading the full `createRenderCoordinator.ts` file (3,799 lines). This document contains only the essential public interfaces and factory function signature needed for understanding the RenderCoordinator API.
+
+The render coordinator has been refactored into a modular architecture with 11 specialized modules under `src/core/renderCoordinator/` (see [INTERNALS.md](INTERNALS.md#modular-architecture-refactoring-complete) for details).
 
 For complete implementation details, see [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
 

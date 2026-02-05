@@ -106,6 +106,7 @@ ChartGPU follows a **functional-first architecture**:
 - **Options**: Deep-merge resolution via `resolveOptions()`
 - **Renderers**: Internal pipeline-based renderers for each series type
 - **Interaction**: Event-driven with render-on-demand scheduling
+- **Render coordinator**: Modular architecture with 11 specialized modules under `src/core/renderCoordinator/` (see [INTERNALS.md](INTERNALS.md#modular-architecture-refactoring-complete))
 
 ### Architecture Diagram
 
@@ -146,7 +147,23 @@ flowchart TB
       GPUInit --> CanvasConfig["canvasContext.configure(format)"]
     end
 
-    subgraph RenderCoordinatorLayer["Render coordinator (src/core/createRenderCoordinator.ts)"]
+    subgraph RenderCoordinatorLayer["Render coordinator (src/core/createRenderCoordinator.ts)<br/>Modular architecture with specialized modules"]
+      subgraph CoordModules["Coordinator modules (src/core/renderCoordinator/*)"]
+        Utils["utils/ - Canvas, bounds, axes, time"]
+        GPU["gpu/ - Texture management"]
+        Renderers["renderers/ - Renderer pools"]
+        DataMods["data/ - Visible slice computation"]
+        Zoom["zoom/ - Zoom utilities"]
+        Anim["animation/ - Animation helpers"]
+        Interact["interaction/ - Pointer handling"]
+        UI["ui/ - Tooltip & legend"]
+        AxisMods["axis/ - Tick & label utilities"]
+        Annot["annotations/ - Annotation processing"]
+        Render["render/ - Series & overlay rendering"]
+      end
+
+      Coordinator --> CoordModules
+
       Coordinator --> Layout["GridArea layout"]
       Coordinator --> Scales["xScale/yScale (clip space for render)"]
       Coordinator --> DataUpload["createDataStore(device) (GPU buffer upload/caching)"]

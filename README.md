@@ -38,7 +38,7 @@ ChartGPU is a TypeScript charting library built on WebGPU for smooth, interactiv
 
 ## Architecture
 
-At a high level, `ChartGPU.create(...)` owns the canvas + WebGPU lifecycle, and delegates render orchestration (layout/scales/data upload/render passes + internal overlays) to the render coordinator. For deeper internal notes, see [`docs/api/INTERNALS.md`](https://github.com/hunterg325/ChartGPU/blob/main/docs/api/INTERNALS.md) (especially “Render coordinator”).
+At a high level, `ChartGPU.create(...)` owns the canvas + WebGPU lifecycle, and delegates render orchestration (layout/scales/data upload/render passes + internal overlays) to the render coordinator. For deeper internal notes, see [`docs/api/INTERNALS.md`](https://github.com/hunterg325/ChartGPU/blob/main/docs/api/INTERNALS.md) (especially "Render coordinator").
 
 ```mermaid
 flowchart TB
@@ -77,7 +77,23 @@ flowchart TB
       GPUInit --> CanvasConfig["canvasContext.configure(format)"]
     end
 
-    subgraph RenderCoordinatorLayer["Render coordinator (src/core/createRenderCoordinator.ts)"]
+    subgraph RenderCoordinatorLayer["Render coordinator (src/core/createRenderCoordinator.ts)<br/>Modular architecture with specialized modules"]
+      subgraph CoordModules["Coordinator modules (src/core/renderCoordinator/*)"]
+        Utils["utils/ - Canvas, bounds, axes, time formatting"]
+        GPU["gpu/ - Texture management, MSAA"]
+        Renderers["renderers/ - Renderer pool management"]
+        DataMods["data/ - Visible slice computation"]
+        Zoom["zoom/ - Zoom state utilities"]
+        Anim["animation/ - Animation helpers"]
+        Interact["interaction/ - Pointer & hit-testing"]
+        UI["ui/ - Tooltip & legend helpers"]
+        AxisMods["axis/ - Tick computation & labels"]
+        Annot["annotations/ - Annotation processing"]
+        Render["render/ - Series, overlays, labels"]
+      end
+
+      Coordinator --> CoordModules
+
       Coordinator --> Layout["GridArea layout"]
       Coordinator --> Scales["xScale/yScale (clip space for render)"]
       Coordinator --> DataUpload["createDataStore(device) (GPU buffer upload/caching)"]
