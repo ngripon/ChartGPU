@@ -358,7 +358,7 @@ async function createChart(dataType: DataType, seriesData: Array<DataPoint[] | O
     animation: false,
     xAxis: { type: 'value' },
     yAxis: { type: 'value' },
-    tooltip: { show: false },
+    tooltip: { show: true },
     dataZoom: [{ type: 'inside' }, { type: 'slider' }],
     series: baseSeries as unknown as ChartGPUOptions['series'],
   };

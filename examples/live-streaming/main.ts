@@ -51,9 +51,10 @@ const createBaseOptions = (data: ReadonlyArray<DataPoint>, autoScroll: boolean):
       data,
       color: '#4a9eff',
       lineStyle: { width: 2, opacity: 1 },
-      // Keep sampling on so the example stays responsive as the buffer grows.
-      sampling: 'lttb',
-      samplingThreshold: 2500,
+      // For streaming performance: sampling='none' enables incremental GPU append (fast-path).
+      // With sampling enabled (e.g., 'lttb'), the entire buffer is re-uploaded every frame,
+      // causing ~1000x more GPU bandwidth usage. See docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md
+      sampling: 'none',
     },
   ],
 });
