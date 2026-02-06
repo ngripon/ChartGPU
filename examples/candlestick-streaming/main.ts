@@ -129,10 +129,8 @@ async function init() {
           upBorderColor: '#16a34a',
           downBorderColor: '#dc2626',
         },
-        // For streaming performance: sampling='none' enables incremental GPU append (fast-path).
-        // With sampling enabled (e.g., 'ohlc'), the entire buffer is re-uploaded every frame.
-        // See docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md for details.
-        sampling: 'none',
+        sampling: 'ohlc',
+        samplingThreshold: 2000,
       },
     ],
     dataZoom: getDataZoomConfig(currentCandleCount),
