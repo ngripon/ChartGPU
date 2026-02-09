@@ -32,7 +32,7 @@ ChartGPU is a TypeScript charting library built on WebGPU for smooth, interactiv
 - 🌡️ Scatter density/heatmap mode (`mode: 'density'`) for large point clouds — see [`docs/api/options.md#scatterseriesconfig`](docs/api/options.md#scatterseriesconfig) and [`examples/scatter-density-1m/`](examples/scatter-density-1m/)
 - 📍 Annotation overlays: reference lines (horizontal/vertical), point markers, and text labels — see [`docs/api/options.md#annotations`](docs/api/options.md#annotations) and [`examples/annotations/`](examples/annotations/)
 - 🧭 Built-in interaction: hover highlight, tooltip, crosshair
-- 🔁 Streaming updates via `appendData(...)` with typed-array support (`XYArraysData`, `InterleavedXYData`, `DataPoint[]`) — see [`examples/cartesian-data-formats/`](examples/cartesian-data-formats/)
+- 🔁 Streaming updates via y-`appendData(...)` with typed-array support (`XYArraysData`, `InterleavedXYData`, `DataPoint[]`) — see [`examples/cartesian-data-formats/`](examples/cartesian-data-formats/)
 - 🔍 X-axis zoom (inside gestures + optional slider UI)
 - 🎛️ Theme presets (`'dark' | 'light'`) and custom theme support
 
