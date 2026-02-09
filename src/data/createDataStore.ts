@@ -1,10 +1,10 @@
-import type { DataPoint, DataPointTuple } from '../config/types';
-import { packDataPoints } from './packDataPoints';
+import type { CartesianSeriesData } from '../config/types';
+import { getPointCount, packXYInto } from './cartesianData';
 
 export interface DataStore {
   setSeries(
     index: number,
-    data: ReadonlyArray<DataPoint>,
+    data: CartesianSeriesData,
     options?: Readonly<{ xOffset?: number }>
   ): void;
   /**
@@ -12,11 +12,11 @@ export interface DataStore {
    *
    * - Reuses the same geometric growth policy as `setSeries`.
    * - When no reallocation is needed, writes only the appended byte range via `queue.writeBuffer(...)`.
-   * - Maintains `pointCount` and a CPU-side combined data array so `getSeriesData(...)` remains correct.
+   * - Maintains `pointCount` for render path queries.
    *
    * Throws if the series has not been set yet.
    */
-  appendSeries(index: number, newPoints: ReadonlyArray<DataPoint>): void;
+  appendSeries(index: number, newPoints: CartesianSeriesData): void;
   removeSeries(index: number): void;
   getSeriesBuffer(index: number): GPUBuffer;
   /**
@@ -25,14 +25,6 @@ export interface DataStore {
    * Throws if the series has not been set yet.
    */
   getSeriesPointCount(index: number): number;
-  /**
-   * Returns the last CPU-side data set for the given series index.
-   *
-   * This is intended for internal metadata/hit-testing paths that need the same
-   * input array that was packed into the GPU buffer (without re-threading it
-   * through other state). Throws if the series has not been set yet.
-   */
-  getSeriesData(index: number): ReadonlyArray<DataPoint>;
   dispose(): void;
 }
 
@@ -46,8 +38,11 @@ type SeriesEntry = {
    * (e.g. epoch-ms time axes). Stored so appendSeries can pack consistently.
    */
   readonly xOffset: number;
-  // Store a mutable array so streaming append can update in-place.
-  readonly data: DataPoint[];
+  /**
+   * Growable staging buffer for interleaved Float32 x,y data.
+   * Maintained to enable efficient incremental append without repacking all data.
+   */
+  readonly stagingBuffer: Float32Array;
 };
 
 const MIN_BUFFER_BYTES = 4;
@@ -92,25 +87,18 @@ export function createDataStore(device: GPUDevice): DataStore {
   const series = new Map<number, SeriesEntry>();
   let disposed = false;
 
-  // Type guard (avoid relying on Array.isArray narrowing for readonly tuples in strict TS configs).
-  const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
+  /**
+   * Packs CartesianSeriesData into an interleaved Float32Array using packXYInto.
+   * Returns a view-safe Float32Array suitable for GPU upload.
+   */
+  const packCartesianData = (data: CartesianSeriesData, xOffset: number): Float32Array => {
+    const pointCount = getPointCount(data);
+    if (pointCount === 0) return new Float32Array(0);
 
-  const packDataPointsWithXOffset = (points: ReadonlyArray<DataPoint>, xOffset: number): Float32Array => {
-    if (!points || points.length === 0) return new Float32Array(0);
-
-    const buffer = new ArrayBuffer(points.length * 2 * 4);
+    const buffer = new ArrayBuffer(pointCount * 2 * 4);
     const f32 = new Float32Array(buffer);
 
-    // Hot path: keep logic minimal (validation happens elsewhere in option resolution).
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i]!;
-      const x = isTupleDataPoint(p) ? p[0] : p.x;
-      const y = isTupleDataPoint(p) ? p[1] : p.y;
-
-      // Subtracting before the Float32 cast preserves sub-ULP deltas for large x magnitudes.
-      f32[i * 2 + 0] = x - xOffset;
-      f32[i * 2 + 1] = y;
-    }
+    packXYInto(f32, 0, data, 0, pointCount, xOffset);
 
     return f32;
   };
@@ -130,12 +118,12 @@ export function createDataStore(device: GPUDevice): DataStore {
     return entry;
   };
 
-  const setSeries = (index: number, data: ReadonlyArray<DataPoint>, options?: Readonly<{ xOffset?: number }>): void => {
+  const setSeries = (index: number, data: CartesianSeriesData, options?: Readonly<{ xOffset?: number }>): void => {
     assertNotDisposed();
 
     const xOffset = options?.xOffset ?? 0;
-    const packed = xOffset === 0 ? packDataPoints(data) : packDataPointsWithXOffset(data, xOffset);
-    const pointCount = data.length;
+    const pointCount = getPointCount(data);
+    const packed = packCartesianData(data, xOffset);
     const hash32 = hashFloat32ArrayBits(packed);
 
     const requiredBytes = roundUpToMultipleOf4(packed.byteLength);
@@ -180,10 +168,14 @@ export function createDataStore(device: GPUDevice): DataStore {
       });
     }
 
-    // Avoid 0-byte writes (empty series). The buffer is still valid for binding.
+    // View-safe GPU upload: explicitly pass byteOffset and byteLength
     if (packed.byteLength > 0) {
-      device.queue.writeBuffer(buffer, 0, packed.buffer);
+      device.queue.writeBuffer(buffer, 0, packed.buffer, packed.byteOffset, packed.byteLength);
     }
+
+    // Create staging buffer matching the packed data for efficient append
+    const stagingBuffer = new Float32Array(capacityBytes / 4);
+    stagingBuffer.set(packed);
 
     series.set(index, {
       buffer,
@@ -191,21 +183,18 @@ export function createDataStore(device: GPUDevice): DataStore {
       pointCount,
       hash32,
       xOffset,
-      data: data.length === 0 ? [] : data.slice(),
+      stagingBuffer,
     });
   };
 
-  const appendSeries = (index: number, newPoints: ReadonlyArray<DataPoint>): void => {
+  const appendSeries = (index: number, newPoints: CartesianSeriesData): void => {
     assertNotDisposed();
-    if (!newPoints || newPoints.length === 0) return;
+    const newPointCount = getPointCount(newPoints);
+    if (newPointCount === 0) return;
 
     const existing = getSeriesEntry(index);
     const prevPointCount = existing.pointCount;
-    const nextPointCount = prevPointCount + newPoints.length;
-
-    const appendPacked =
-      existing.xOffset === 0 ? packDataPoints(newPoints) : packDataPointsWithXOffset(newPoints, existing.xOffset);
-    const appendBytes = appendPacked.byteLength;
+    const nextPointCount = prevPointCount + newPointCount;
 
     // Each point is 2 floats (x, y) = 8 bytes.
     const requiredBytes = roundUpToMultipleOf4(nextPointCount * 2 * 4);
@@ -213,10 +202,7 @@ export function createDataStore(device: GPUDevice): DataStore {
 
     let buffer = existing.buffer;
     let capacityBytes = existing.capacityBytes;
-
-    // Ensure the CPU-side store is updated regardless of GPU growth path.
-    const nextData = existing.data;
-    nextData.push(...newPoints);
+    let stagingBuffer = existing.stagingBuffer;
 
     const maxBufferSize = device.limits.maxBufferSize;
 
@@ -242,10 +228,16 @@ export function createDataStore(device: GPUDevice): DataStore {
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
 
-      const fullPacked =
-        existing.xOffset === 0 ? packDataPoints(nextData) : packDataPointsWithXOffset(nextData, existing.xOffset);
+      // Create new staging buffer with grown capacity
+      const newStagingBuffer = new Float32Array(capacityBytes / 4);
+      // Copy old data
+      newStagingBuffer.set(stagingBuffer.subarray(0, prevPointCount * 2));
+      // Pack new data directly into staging buffer
+      packXYInto(newStagingBuffer, prevPointCount * 2, newPoints, 0, newPointCount, existing.xOffset);
+      
+      const fullPacked = newStagingBuffer.subarray(0, nextPointCount * 2);
       if (fullPacked.byteLength > 0) {
-        device.queue.writeBuffer(buffer, 0, fullPacked.buffer);
+        device.queue.writeBuffer(buffer, 0, fullPacked.buffer, fullPacked.byteOffset, fullPacked.byteLength);
       }
 
       series.set(index, {
@@ -254,19 +246,22 @@ export function createDataStore(device: GPUDevice): DataStore {
         pointCount: nextPointCount,
         hash32: hashFloat32ArrayBits(fullPacked),
         xOffset: existing.xOffset,
-        data: nextData,
+        stagingBuffer: newStagingBuffer,
       });
       return;
     }
 
-    // Fast path: write only the appended range into the existing buffer.
-    if (appendBytes > 0) {
+    // Fast path: pack directly into existing staging buffer and upload only the appended range.
+    packXYInto(stagingBuffer, prevPointCount * 2, newPoints, 0, newPointCount, existing.xOffset);
+    
+    const appendedView = stagingBuffer.subarray(prevPointCount * 2, nextPointCount * 2);
+    if (appendedView.byteLength > 0) {
       const byteOffset = prevPointCount * 2 * 4;
-      device.queue.writeBuffer(buffer, byteOffset, appendPacked.buffer);
+      device.queue.writeBuffer(buffer, byteOffset, appendedView.buffer, appendedView.byteOffset, appendedView.byteLength);
     }
 
     // Incremental FNV-1a update over the appended IEEE-754 bit patterns.
-    const appendWords = new Uint32Array(appendPacked.buffer, appendPacked.byteOffset, appendPacked.byteLength / 4);
+    const appendWords = new Uint32Array(appendedView.buffer, appendedView.byteOffset, appendedView.byteLength / 4);
     const nextHash32 = fnv1aUpdate(existing.hash32, appendWords);
 
     series.set(index, {
@@ -275,7 +270,7 @@ export function createDataStore(device: GPUDevice): DataStore {
       pointCount: nextPointCount,
       hash32: nextHash32,
       xOffset: existing.xOffset,
-      data: nextData,
+      stagingBuffer,
     });
   };
 
@@ -301,10 +296,6 @@ export function createDataStore(device: GPUDevice): DataStore {
     return getSeriesEntry(index).pointCount;
   };
 
-  const getSeriesData = (index: number): ReadonlyArray<DataPoint> => {
-    return getSeriesEntry(index).data;
-  };
-
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
@@ -325,7 +316,6 @@ export function createDataStore(device: GPUDevice): DataStore {
     removeSeries,
     getSeriesBuffer,
     getSeriesPointCount,
-    getSeriesData,
     dispose,
   };
 }

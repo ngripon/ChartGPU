@@ -8,6 +8,7 @@
  */
 
 import type { ResolvedChartGPUOptions, ResolvedSeriesConfig, ResolvedBarSeriesConfig, ResolvedAreaSeriesConfig, ResolvedPieSeriesConfig } from '../../../config/OptionResolver';
+import type { DataPoint } from '../../../config/types';
 import type { LinearScale } from '../../../utils/scales';
 import type { GridArea } from '../../../renderers/createGridRenderer';
 import type { LineRenderer } from '../../../renderers/createLineRenderer';
@@ -20,11 +21,11 @@ import type { CandlestickRenderer } from '../../../renderers/createCandlestickRe
 import type { ReferenceLineRenderer } from '../../../renderers/createReferenceLineRenderer';
 import type { AnnotationMarkerRenderer } from '../../../renderers/createAnnotationMarkerRenderer';
 import type { DataStore } from '../../../data/createDataStore';
-import { isTupleDataPoint } from '../utils/dataPointUtils';
 import { clampInt } from '../utils/canvasUtils';
 import { clamp01 } from '../animation/animationHelpers';
 import { findVisibleRangeIndicesByX } from '../data/computeVisibleSlice';
 import { resolvePieRadiiCss } from '../utils/timeAxisUtils';
+import { getPointCount, getX } from '../../../data/cartesianData';
 
 export interface SeriesRenderers {
   lineRenderers: LineRenderer[];
@@ -149,15 +150,15 @@ export function prepareSeries(
         const xOffset = (() => {
           if (currentOptions.xAxis.type !== 'time') return 0;
           const d = s.data;
-          for (let k = 0; k < d.length; k++) {
-            const p = d[k]!;
-            const x = isTupleDataPoint(p) ? p[0] : p.x;
+          const count = getPointCount(d);
+          for (let k = 0; k < count; k++) {
+            const x = getX(d, k);
             if (Number.isFinite(x)) return x;
           }
           return 0;
         })();
         if (!appendedGpuThisFrame.has(i)) {
-          dataStore.setSeries(i, s.data, { xOffset });
+          dataStore.setSeries(i, s.data as ReadonlyArray<DataPoint>, { xOffset });
         }
         const buffer = dataStore.getSeriesBuffer(i);
         renderers.lineRenderers[i].prepare(s, buffer, xScale, yScale, xOffset);
@@ -203,7 +204,7 @@ export function prepareSeries(
         if (s.mode === 'density') {
           // Density mode bins raw (unsampled) data for correctness, but limits compute to the visible
           // range when x is monotonic.
-          const rawData = s.rawData ?? s.data;
+          const rawData = (s.rawData ?? s.data) as ReadonlyArray<DataPoint>;
           const visible = findVisibleRangeIndicesByX(rawData, visibleXDomain.min, visibleXDomain.max);
 
           // Upload full raw data for compute. DataStore hashing makes this a cheap no-op when unchanged.

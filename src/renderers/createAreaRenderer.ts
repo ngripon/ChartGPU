@@ -1,14 +1,15 @@
 import areaWgsl from '../shaders/area.wgsl?raw';
 import type { ResolvedAreaSeriesConfig } from '../config/OptionResolver';
-import type { DataPointTuple } from '../config/types';
+import type { CartesianSeriesData } from '../config/types';
 import type { LinearScale } from '../utils/scales';
 import { parseCssColorToRgba01 } from '../utils/colors';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { getPointCount, getX, getY, computeRawBoundsFromCartesianData } from '../data/cartesianData';
 
 export interface AreaRenderer {
   prepare(
     seriesConfig: ResolvedAreaSeriesConfig,
-    data: ResolvedAreaSeriesConfig['data'],
+    data: CartesianSeriesData,
     xScale: LinearScale,
     yScale: LinearScale,
     baseline?: number
@@ -35,42 +36,6 @@ const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 const parseSeriesColorToRgba01 = (color: string): Rgba =>
   parseCssColorToRgba01(color) ?? ([0, 0, 0, 1] as const);
 
-const isTupleDataPoint = (point: ResolvedAreaSeriesConfig['data'][number]): point is DataPointTuple => Array.isArray(point);
-
-const getPointXY = (
-  point: ResolvedAreaSeriesConfig['data'][number]
-): { readonly x: number; readonly y: number } => {
-  if (isTupleDataPoint(point)) return { x: point[0], y: point[1] };
-  return { x: point.x, y: point.y };
-};
-
-const computeDataBounds = (
-  data: ResolvedAreaSeriesConfig['data']
-): { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number } => {
-  let xMin = Number.POSITIVE_INFINITY;
-  let xMax = Number.NEGATIVE_INFINITY;
-  let yMin = Number.POSITIVE_INFINITY;
-  let yMax = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < data.length; i++) {
-    const { x, y } = getPointXY(data[i]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
-    return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
-  }
-
-  // Avoid degenerate domains for affine derivation (handled later too, but keep stable samples).
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-
-  return { xMin, xMax, yMin, yMax };
-};
 
 const computeClipAffineFromScale = (
   scale: LinearScale,
@@ -110,15 +75,16 @@ const writeTransformMat4F32 = (out: Float32Array, ax: number, bx: number, ay: nu
   out[15] = 1; // col3
 };
 
-const createAreaVertices = (data: ResolvedAreaSeriesConfig['data']): Float32Array => {
+const createAreaVertices = (data: CartesianSeriesData): Float32Array => {
   // Triangle-strip expects duplicated vertices:
   // p0,p0,p1,p1,... and WGSL uses vertex_index parity to swap y to baseline for odd indices.
-  const n = data.length;
+  const n = getPointCount(data);
   const out = new Float32Array(n * 2 * 2); // n * 2 vertices * vec2<f32>
 
   let idx = 0;
   for (let i = 0; i < n; i++) {
-    const { x, y } = getPointXY(data[i]);
+    const x = getX(data, i);
+    const y = getY(data, i);
     out[idx++] = x;
     out[idx++] = y;
     out[idx++] = x;
@@ -241,7 +207,8 @@ export function createAreaRenderer(device: GPUDevice, options?: AreaRendererOpti
     }
     vertexCount = vertices.length / 2;
 
-    const { xMin, xMax, yMin, yMax } = computeDataBounds(data);
+    const bounds = computeRawBoundsFromCartesianData(data);
+    const { xMin, xMax, yMin, yMax } = bounds ?? { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const { a: ax, b: bx } = computeClipAffineFromScale(xScale, xMin, xMax);
     const { a: ay, b: by } = computeClipAffineFromScale(yScale, yMin, yMax);
 

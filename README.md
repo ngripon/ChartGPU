@@ -11,6 +11,11 @@
 [![Examples](https://img.shields.io/badge/Examples-Code%20Samples-blue?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/tree/main/examples)
 [![Documentation](https://img.shields.io/badge/Documentation-Getting%20Started-blue?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/blob/main/docs/GETTING_STARTED.md)
 
+[![NPM Downloads](https://img.shields.io/npm/dm/chartgpu?style=for-the-badge&&color=%2368cc49)](https://www.npmjs.com/package/chartgpu)
+
+
+
+
 [![npm version](https://img.shields.io/npm/v/chartgpu?style=for-the-badge&color=blue)](https://www.npmjs.com/package/chartgpu)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://github.com/hunterg325/ChartGPU/blob/main/LICENSE)
 [![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?style=for-the-badge)](https://chartgpu.github.io/ChartGPU/)
@@ -32,7 +37,7 @@ ChartGPU is a TypeScript charting library built on WebGPU for smooth, interactiv
 - 🌡️ Scatter density/heatmap mode (`mode: 'density'`) for large point clouds — see [`docs/api/options.md#scatterseriesconfig`](docs/api/options.md#scatterseriesconfig) and [`examples/scatter-density-1m/`](examples/scatter-density-1m/)
 - 📍 Annotation overlays: reference lines (horizontal/vertical), point markers, and text labels — see [`docs/api/options.md#annotations`](docs/api/options.md#annotations) and [`examples/annotations/`](examples/annotations/)
 - 🧭 Built-in interaction: hover highlight, tooltip, crosshair
-- 🔁 Streaming updates via `appendData(...)` (cartesian series)
+- 🔁 Streaming updates via y-`appendData(...)` with typed-array support (`XYArraysData`, `InterleavedXYData`, `DataPoint[]`) — see [`examples/cartesian-data-formats/`](examples/cartesian-data-formats/)
 - 🔍 X-axis zoom (inside gestures + optional slider UI)
 - 🎛️ Theme presets (`'dark' | 'light'`) and custom theme support
 
@@ -61,7 +66,7 @@ flowchart TB
       RequestRender --> Coordinator
 
       InstanceAPI --> SetOption["setOption(...)"]
-      InstanceAPI --> AppendData["appendData(...)"]
+      InstanceAPI --> AppendData["appendData(...)<br/>(XYArraysData | InterleavedXYData | DataPoint[])"]
       InstanceAPI --> Resize["resize()"]
 
       subgraph PublicEvents["Public events + hit-testing (ChartGPU.ts)"]
@@ -145,6 +150,8 @@ flowchart TB
   subgraph ChartSync["Chart sync (src/interaction/createChartSync.ts)"]
     SyncAPI --> ListenX["listen: 'crosshairMove'"]
     SyncAPI --> DriveX["setCrosshairX(...) on peers"]
+    SyncAPI -. "optional" .-> ListenZoom["listen: 'zoomRangeChange'"]
+    SyncAPI -. "optional" .-> DriveZoom["setZoomRange(...) on peers"]
   end
 
   InteractionX --> ListenX

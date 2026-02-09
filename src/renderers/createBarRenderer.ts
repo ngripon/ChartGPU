@@ -1,11 +1,11 @@
 import barWgsl from '../shaders/bar.wgsl?raw';
 import type { ResolvedBarSeriesConfig } from '../config/OptionResolver';
-import type { DataPoint, DataPointTuple } from '../config/types';
 import type { LinearScale } from '../utils/scales';
 import type { GridArea } from './createGridRenderer';
 import { parseCssColorToRgba01 } from '../utils/colors';
 import type { DataStore } from '../data/createDataStore';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { getPointCount, getX, getY } from '../data/cartesianData';
 
 export interface BarRenderer {
   prepare(
@@ -70,13 +70,6 @@ const normalizeStackId = (stack: unknown): string => {
   if (typeof stack !== 'string') return '';
   const trimmed = stack.trim();
   return trimmed.length > 0 ? trimmed : '';
-};
-
-const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
-
-const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } => {
-  if (isTupleDataPoint(p)) return { x: p[0], y: p[1] };
-  return { x: p.x, y: p.y };
 };
 
 const computePlotSizeCssPx = (gridArea: GridArea): { readonly plotWidthCss: number; readonly plotHeightCss: number } | null => {
@@ -201,8 +194,9 @@ export function createBarRenderer(device: GPUDevice, options?: BarRendererOption
     categoryXScratch.length = 0;
     for (let s = 0; s < seriesConfigs.length; s++) {
       const data = seriesConfigs[s].data;
-      for (let i = 0; i < data.length; i++) {
-        const { x } = getPointXY(data[i]);
+      const count = getPointCount(data);
+      for (let i = 0; i < count; i++) {
+        const x = getX(data, i);
         if (Number.isFinite(x)) categoryXScratch.push(x);
       }
     }
@@ -241,8 +235,9 @@ export function createBarRenderer(device: GPUDevice, options?: BarRendererOption
 
     for (let s = 0; s < seriesConfigs.length; s++) {
       const data = seriesConfigs[s].data;
-      for (let i = 0; i < data.length; i++) {
-        const { y } = getPointXY(data[i]);
+      const count = getPointCount(data);
+      for (let i = 0; i < count; i++) {
+        const y = getY(data, i);
         if (!Number.isFinite(y)) continue;
         if (y < yMin) yMin = y;
         if (y > yMax) yMax = y;
@@ -329,7 +324,8 @@ export function createBarRenderer(device: GPUDevice, options?: BarRendererOption
 
     let fallbackCategoryCount = 1;
     for (let s = 0; s < seriesConfigs.length; s++) {
-      fallbackCategoryCount = Math.max(fallbackCategoryCount, Math.floor(seriesConfigs[s].data.length));
+      const dataLength = getPointCount(seriesConfigs[s].data);
+      fallbackCategoryCount = Math.max(fallbackCategoryCount, Math.floor(dataLength));
     }
 
     const categoryWidthClip = computeCategoryWidthClip(xScale, categoryStep, plotClipRect, fallbackCategoryCount);
@@ -374,7 +370,9 @@ export function createBarRenderer(device: GPUDevice, options?: BarRendererOption
     }
 
     let maxBars = 0;
-    for (let s = 0; s < seriesConfigs.length; s++) maxBars += Math.max(0, seriesConfigs[s].data.length);
+    for (let s = 0; s < seriesConfigs.length; s++) {
+      maxBars += Math.max(0, getPointCount(seriesConfigs[s].data));
+    }
 
     ensureCpuInstanceCapacityFloats(maxBars * INSTANCE_STRIDE_FLOATS);
     const f32 = cpuInstanceStagingF32;
@@ -390,8 +388,10 @@ export function createBarRenderer(device: GPUDevice, options?: BarRendererOption
       const stackId = normalizeStackId(series.stack);
       const clusterIndex = clusterIndexBySeries[seriesIndex] ?? 0;
 
-      for (let i = 0; i < data.length; i++) {
-        const { x, y } = getPointXY(data[i]);
+      const count = getPointCount(data);
+      for (let i = 0; i < count; i++) {
+        const x = getX(data, i);
+        const y = getY(data, i);
         const xClipCenter = xScale.scale(x);
         if (!Number.isFinite(xClipCenter) || !Number.isFinite(y)) continue;
 
