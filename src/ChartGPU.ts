@@ -86,11 +86,20 @@ export interface ChartGPUInstance {
   /**
    * Appends new points to a cartesian series at runtime (streaming).
    *
-   * For candlestick series, pass `OHLCDataPoint[]`.
-   * For other cartesian series (line, area, bar, scatter), pass `DataPoint[]`.
+   * Accepts multiple formats for efficient data append without per-point object allocations:
+   * - `DataPoint[]`: Traditional array of point objects/tuples (existing behavior)
+   * - `XYArraysData`: Separate x/y/size arrays (`{x: ArrayLike<number>, y: ArrayLike<number>, size?: ArrayLike<number>}`)
+   * - `InterleavedXYData`: Typed array with [x0,y0,x1,y1,...] layout (e.g. `Float32Array`)
+   * - `OHLCDataPoint[]`: For candlestick series only
+   *
+   * Point count is derived via `getPointCount()` from `cartesianData.ts`:
+   * - `XYArraysData`: min(x.length, y.length)
+   * - `InterleavedXYData`: floor(length / 2), ignoring trailing odd element
+   * - `DataView` is unsupported and throws an error
+   *
    * Pie series are non-cartesian and are not supported by streaming append.
    */
-  appendData(seriesIndex: number, newPoints: DataPoint[] | OHLCDataPoint[]): void;
+  appendData(seriesIndex: number, newPoints: CartesianSeriesData | OHLCDataPoint[]): void;
   resize(): void;
   dispose(): void;
   on(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
@@ -203,6 +212,18 @@ const DEFAULT_TAP_MAX_TIME_MS = 500;
 
 type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number }>;
 
+/**
+ * Mutable columnar store for cartesian series data in the hit-test runtime.
+ * Supports efficient append without per-point DataPoint object allocations.
+ * 
+ * Note: size array is aligned with x/y arrays (same length), with undefined for points without size values.
+ */
+type MutableXYColumns = {
+  x: number[];
+  y: number[];
+  size?: (number | undefined)[];
+};
+
 const isTupleDataPoint = (p: DataPoint): p is DataPointTuple => Array.isArray(p);
 const isTupleOHLCDataPoint = (p: OHLCDataPoint): p is OHLCDataPointTuple => Array.isArray(p);
 
@@ -211,21 +232,31 @@ const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } =>
   return { x: p.x, y: p.y };
 };
 
-const cartesianDataToDataPointArray = (data: CartesianSeriesData): DataPoint[] => {
-  // Clone DataPoint[] so we can mutate for streaming appends without touching user input.
-  if (Array.isArray(data)) return data.length === 0 ? [] : (data.slice() as DataPoint[]);
-
+/**
+ * Converts CartesianSeriesData to MutableXYColumns for the runtime hit-test store.
+ * Extracts x, y, and optional size values into separate mutable arrays.
+ * Size array is aligned with x/y arrays (same length), with undefined for points without size values.
+ */
+const cartesianDataToMutableColumns = (data: CartesianSeriesData): MutableXYColumns => {
   const n = getCartesianPointCount(data);
-  if (n === 0) return [];
+  if (n === 0) return { x: [], y: [] };
 
-  const out: DataPoint[] = new Array(n);
+  const x: number[] = new Array(n);
+  const y: number[] = new Array(n);
+  const sizeValues: (number | undefined)[] = [];
+  let hasSizeValues = false;
+
   for (let i = 0; i < n; i++) {
-    const x = getCartesianX(data, i);
-    const y = getCartesianY(data, i);
+    x[i] = getCartesianX(data, i);
+    y[i] = getCartesianY(data, i);
     const size = getCartesianSize(data, i);
-    out[i] = (size === undefined ? [x, y] : [x, y, size]) as DataPointTuple;
+    sizeValues[i] = size;
+    if (size !== undefined) {
+      hasSizeValues = true;
+    }
   }
-  return out;
+
+  return hasSizeValues ? { x, y, size: sizeValues } : { x, y };
 };
 
 const getOHLCTimestamp = (p: OHLCDataPoint): number => (isTupleOHLCDataPoint(p) ? p[0] : p.timestamp);
@@ -248,38 +279,17 @@ type InteractionScalesCache = {
   yScale: LinearScale;
 };
 
-const computeRawBoundsFromData = (data: ReadonlyArray<DataPoint>): Bounds | null => {
-  let xMin = Number.POSITIVE_INFINITY;
-  let xMax = Number.NEGATIVE_INFINITY;
-  let yMin = Number.POSITIVE_INFINITY;
-  let yMax = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < data.length; i++) {
-    const { x, y } = getPointXY(data[i]!);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
-    return null;
-  }
-
-  // Keep bounds usable for downstream scale derivation.
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-
-  return { xMin, xMax, yMin, yMax };
-};
-
-const extendBoundsWithDataPoints = (bounds: Bounds | null, points: ReadonlyArray<DataPoint>): Bounds | null => {
-  if (points.length === 0) return bounds;
+/**
+ * Extends bounds with new CartesianSeriesData (any format).
+ * Avoids per-point object allocations by using getX/getY accessors.
+ */
+const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSeriesData): Bounds | null => {
+  const n = getCartesianPointCount(data);
+  if (n === 0) return bounds;
 
   let b = bounds;
   if (!b) {
-    const seeded = computeRawBoundsFromData(points);
+    const seeded = computeRawBoundsFromCartesianData(data);
     if (!seeded) return bounds;
     b = seeded;
   }
@@ -289,8 +299,9 @@ const extendBoundsWithDataPoints = (bounds: Bounds | null, points: ReadonlyArray
   let yMin = b.yMin;
   let yMax = b.yMax;
 
-  for (let i = 0; i < points.length; i++) {
-    const { x, y } = getPointXY(points[i]!);
+  for (let i = 0; i < n; i++) {
+    const x = getCartesianX(data, i);
+    const y = getCartesianY(data, i);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     if (x < xMin) xMin = x;
     if (x > xMax) xMax = x;
@@ -569,22 +580,28 @@ export async function createChartGPU(
   let resolvedOptions: ResolvedChartGPUOptions = resolveOptionsForChart(currentOptions);
 
   // Chart-owned runtime series store for hit-testing only (cartesian only).
-  // - `runtimeRawDataByIndex[i]` is a mutable array used to reflect streaming appends.
+  // - `runtimeRawDataByIndex[i]` is a mutable columnar store (MutableXYColumns) for non-candlestick series,
+  //   or a mutable OHLCDataPoint[] for candlestick series. This supports efficient streaming appends
+  //   without per-point object allocations.
   // - `runtimeRawBoundsByIndex[i]` is incrementally updated to keep scale/bounds derivation cheap.
-  let runtimeRawDataByIndex: Array<DataPoint[] | OHLCDataPoint[]> = new Array(resolvedOptions.series.length).fill(null).map(() => []);
+  let runtimeRawDataByIndex: Array<MutableXYColumns | OHLCDataPoint[]> = new Array(resolvedOptions.series.length).fill(null).map(() => ({ x: [], y: [] }));
   let runtimeRawBoundsByIndex: Array<Bounds | null> = new Array(resolvedOptions.series.length).fill(null);
   let runtimeHitTestSeriesCache: ResolvedChartGPUOptions['series'] | null = null;
   let runtimeHitTestSeriesVersion = 0;
 
   const initRuntimeHitTestStoreFromResolvedOptions = (): void => {
-    runtimeRawDataByIndex = new Array(resolvedOptions.series.length).fill(null).map(() => []);
+    runtimeRawDataByIndex = new Array(resolvedOptions.series.length).fill(null).map(() => ({ x: [], y: [] }));
     runtimeRawBoundsByIndex = new Array(resolvedOptions.series.length).fill(null);
     runtimeHitTestSeriesCache = null;
     runtimeHitTestSeriesVersion++;
 
     for (let i = 0; i < resolvedOptions.series.length; i++) {
       const s = resolvedOptions.series[i]!;
-      if (s.type === 'pie') continue;
+      if (s.type === 'pie') {
+        // Pie series don't use the runtime store (non-cartesian)
+        runtimeRawDataByIndex[i] = { x: [], y: [] };
+        continue;
+      }
 
       if (s.type === 'candlestick') {
         const raw = ((s as unknown as { rawData?: ReadonlyArray<OHLCDataPoint> }).rawData ?? s.data) as ReadonlyArray<OHLCDataPoint>;
@@ -592,7 +609,7 @@ export async function createChartGPU(
         runtimeRawBoundsByIndex[i] = ((s as unknown as { rawBounds?: Bounds | null }).rawBounds ?? null);
       } else {
         const raw = ((s as unknown as { rawData?: CartesianSeriesData }).rawData ?? s.data) as CartesianSeriesData;
-        runtimeRawDataByIndex[i] = cartesianDataToDataPointArray(raw);
+        runtimeRawDataByIndex[i] = cartesianDataToMutableColumns(raw);
         runtimeRawBoundsByIndex[i] =
           ((s as unknown as { rawBounds?: Bounds | null }).rawBounds ?? null) ?? (computeRawBoundsFromCartesianData(raw) as Bounds | null);
       }
@@ -607,7 +624,9 @@ export async function createChartGPU(
       if (s.type === 'candlestick') {
         return { ...s, data: runtimeRawDataByIndex[i] ?? (s.data as ReadonlyArray<OHLCDataPoint>) };
       }
-      return { ...s, data: runtimeRawDataByIndex[i] ?? (s.data as ReadonlyArray<DataPoint>) };
+      // For non-candlestick cartesian series, runtime store is MutableXYColumns (compatible with XYArraysData)
+      const runtimeData = runtimeRawDataByIndex[i] as MutableXYColumns;
+      return { ...s, data: runtimeData as CartesianSeriesData };
     }) as ResolvedChartGPUOptions['series'];
     return runtimeHitTestSeriesCache;
   };
@@ -1411,7 +1430,6 @@ export async function createChartGPU(
       if (disposed) return;
       if (!Number.isFinite(seriesIndex)) return;
       if (seriesIndex < 0 || seriesIndex >= resolvedOptions.series.length) return;
-      if (!newPoints || newPoints.length === 0) return;
 
       const s = resolvedOptions.series[seriesIndex]!;
       if (s.type === 'pie') {
@@ -1425,13 +1443,25 @@ export async function createChartGPU(
         return;
       }
 
+      // Early validation: compute append count in a format-aware way.
+      // Disambiguate by series type (avoid heuristics on the data payload).
+      let pointCount = 0;
+      if (s.type === 'candlestick') {
+        if (!Array.isArray(newPoints)) return;
+        pointCount = newPoints.length;
+      } else {
+        pointCount = getCartesianPointCount(newPoints as CartesianSeriesData);
+      }
+      if (pointCount === 0) return;
+
       // Forward to coordinator (GPU buffers + render-state updates), then keep ChartGPU's
       // hit-testing runtime store in sync.
       coordinator?.appendData(seriesIndex, newPoints);
 
       if (s.type === 'candlestick') {
         // Handle candlestick series with OHLC data points.
-        const owned = (runtimeRawDataByIndex[seriesIndex] ?? []) as OHLCDataPoint[];
+        const existing = runtimeRawDataByIndex[seriesIndex];
+        const owned = (Array.isArray(existing) ? existing : []) as OHLCDataPoint[];
         owned.push(...(newPoints as OHLCDataPoint[]));
         runtimeRawDataByIndex[seriesIndex] = owned;
 
@@ -1440,14 +1470,40 @@ export async function createChartGPU(
           newPoints as OHLCDataPoint[]
         );
       } else {
-        // Handle other cartesian series (line, area, bar, scatter).
-        const owned = (runtimeRawDataByIndex[seriesIndex] ?? []) as DataPoint[];
-        owned.push(...(newPoints as DataPoint[]));
-        runtimeRawDataByIndex[seriesIndex] = owned;
+        // Handle other cartesian series (line, area, bar, scatter) with columnar append.
+        const owned = runtimeRawDataByIndex[seriesIndex] as MutableXYColumns;
+        const appendData = newPoints as CartesianSeriesData;
 
-        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(
+        // Track if any appended point has a size value
+        let hasAnySizeValue = false;
+        const sizesToAppend: (number | undefined)[] = new Array(pointCount);
+        
+        for (let i = 0; i < pointCount; i++) {
+          const size = getCartesianSize(appendData, i);
+          sizesToAppend[i] = size;
+          if (size !== undefined) hasAnySizeValue = true;
+        }
+
+        // Append x, y values directly to columnar arrays (no DataPoint object allocation)
+        for (let i = 0; i < pointCount; i++) {
+          owned.x.push(getCartesianX(appendData, i));
+          owned.y.push(getCartesianY(appendData, i));
+        }
+
+        // Handle size array alignment: ensure size array indices match x/y array indices
+        // If we've ever had a size array, keep it aligned by appending `undefined` when missing.
+        if (owned.size || hasAnySizeValue) {
+          if (!owned.size) {
+            // Backfill undefined for existing points that didn't have size values
+            owned.size = new Array(owned.x.length - pointCount);
+          }
+          // Append size values (including undefined for points without size)
+          owned.size.push(...sizesToAppend);
+        }
+
+        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithCartesianData(
           runtimeRawBoundsByIndex[seriesIndex],
-          newPoints as DataPoint[]
+          appendData
         );
       }
 
@@ -1626,6 +1682,10 @@ export async function createChartGPU(
         for (let i = resolvedOptions.series.length - 1; i >= 0; i--) {
           const s = resolvedOptions.series[i];
           if (s.type !== 'pie') continue;
+          
+          // Skip invisible series
+          if (s.visible === false) continue;
+          
           const pieSeries = s as ResolvedPieSeriesConfig;
           const center = resolvePieCenterPlotCss(pieSeries.center, plotWidthCss, plotHeightCss);
           const radii = resolvePieRadiiCss(pieSeries.radius, maxRadiusCss);
@@ -1663,6 +1723,9 @@ export async function createChartGPU(
       for (let i = resolvedOptions.series.length - 1; i >= 0; i--) {
         const s = resolvedOptions.series[i];
         if (s?.type !== 'candlestick') continue;
+        
+        // Skip invisible series
+        if (s.visible === false) continue;
 
         const seriesCfg = s as ResolvedCandlestickSeriesConfig;
         const barWidthRange = computeCandlestickBodyWidthRange(seriesCfg, seriesCfg.data, scales.xScale, plotWidthCss);

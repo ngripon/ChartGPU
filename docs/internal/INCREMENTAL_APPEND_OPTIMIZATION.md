@@ -13,7 +13,7 @@ The current `appendSeries` implementation already supports incremental writes:
 1. **Fast path (no reallocation)**: Writes only the appended byte range via `queue.writeBuffer(buffer, byteOffset, appendPacked.buffer)`
 2. **Slow path (reallocation)**: When buffer growth is needed, re-uploads the entire series
 3. **Hash maintenance**: Uses incremental FNV-1a hash updates over appended IEEE-754 bit patterns
-4. **CPU-side tracking**: Maintains mutable `data` array for `getSeriesData()` correctness
+4. **Staging buffer**: Maintains `stagingBuffer` Float32Array for efficient incremental appends without repacking
 
 ### Current Usage Pattern
 
@@ -141,31 +141,33 @@ for (let i = 0; i < seriesForRender.length; i++) {
 
 ### Option 2: DataStore Heuristic (Alternative)
 
-Add a heuristic to `setSeries` to detect append-only patterns:
+Add a heuristic to `setSeries` to detect append-only patterns by comparing the staging buffer contents:
 
 ```typescript
-const setSeries = (index: number, data: ReadonlyArray<DataPoint>): void => {
+const setSeries = (index: number, data: CartesianSeriesData, options?: Readonly<{ xOffset?: number }>): void => {
   const existing = series.get(index);
   
-  // Heuristic: if new data starts with existing data, try incremental append
+  // Heuristic: compare packed data against staging buffer prefix
   if (existing && existing.pointCount > 0) {
-    const existingData = existing.data;
-    if (data.length >= existingData.length) {
+    const pointCount = getPointCount(data);
+    if (pointCount >= existing.pointCount) {
+      const testPacked = packCartesianData(data, options?.xOffset ?? 0);
+      const prefix = testPacked.subarray(0, existing.pointCount * 2);
+      const existingPrefix = existing.stagingBuffer.subarray(0, existing.pointCount * 2);
+      
       let isPrefixMatch = true;
-      for (let i = 0; i < existingData.length; i++) {
-        if (data[i] !== existingData[i]) {
+      for (let i = 0; i < prefix.length; i++) {
+        if (prefix[i] !== existingPrefix[i]) {
           isPrefixMatch = false;
           break;
         }
       }
       
-      if (isPrefixMatch) {
-        // Append only the new points
-        const newPoints = data.slice(existingData.length);
-        if (newPoints.length > 0) {
-          appendSeries(index, newPoints);
-          return;
-        }
+      if (isPrefixMatch && pointCount > existing.pointCount) {
+        // Extract and append only the new points
+        const newPacked = testPacked.subarray(existing.pointCount * 2);
+        appendSeries(index, newPacked);
+        return;
       }
     }
   }
@@ -181,8 +183,9 @@ const setSeries = (index: number, data: ReadonlyArray<DataPoint>): void => {
 
 **Cons**:
 - Less explicit control
-- Requires point-by-point comparison (O(n) cost)
+- Requires Float32 comparison (O(n) cost)
 - May not work correctly with sampling/zoom
+- Requires packing data twice when no match
 
 **Recommendation**: Prefer Option 1 (render coordinator decision) for explicit control and correctness.
 
@@ -223,8 +226,8 @@ const setSeries = (index: number, data: ReadonlyArray<DataPoint>): void => {
 ```typescript
 // In appendSeries, after incremental hash update:
 if (process.env.NODE_ENV === 'development') {
-  const fullPacked = packDataPoints(nextData);
-  const fullHash = hashFloat32ArrayBits(fullPacked.f32);
+  const fullView = stagingBuffer.subarray(0, nextPointCount * 2);
+  const fullHash = hashFloat32ArrayBits(fullView);
   if (nextHash32 !== fullHash) {
     console.warn(`DataStore.appendSeries(${index}): hash mismatch (incremental: ${nextHash32}, full: ${fullHash})`);
   }

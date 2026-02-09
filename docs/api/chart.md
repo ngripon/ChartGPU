@@ -20,7 +20,42 @@ See [ChartGPU.ts](../../src/ChartGPU.ts) for the full interface and lifecycle be
 **Methods (essential):**
 
 - `setOption(options: ChartGPUOptions): void`: replaces the current user options, resolves them against defaults via [`resolveOptions`](../../src/config/OptionResolver.ts), updates internal render state, and schedules a single on-demand render on the next `requestAnimationFrame` tick (coalesces multiple calls).
-- `appendData(seriesIndex: number, newPoints: DataPoint[] | OHLCDataPoint[]): void`: appends new points to a **cartesian** series at runtime (streaming), updates internal runtime bounds, and schedules a render (coalesces). For candlestick series, pass `OHLCDataPoint[]`. For other cartesian series (line/area/bar/scatter), pass `DataPoint[]`. Internally, streaming appends are flushed via a unified scheduler (rAF-first with a small timeout fallback) and only do resampling work when zoom is active or a zoom change debounce matures. When `ChartGPUOptions.autoScroll === true`, this may also adjust the x-axis percent zoom window (see **Auto-scroll (streaming)** below). Pie series are not supported by streaming append. See [`ChartGPU.ts`](../../src/ChartGPU.ts) and [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts). For an end-to-end example, see [`examples/live-streaming/`](../../examples/live-streaming/) and [`examples/candlestick-streaming/`](../../examples/candlestick-streaming/).
+- `appendData(seriesIndex: number, newPoints: DataPoint[] | XYArraysData | InterleavedXYData | OHLCDataPoint[]): void`: appends new points to a **cartesian** series at runtime (streaming), updates internal runtime bounds, and schedules a render (coalesces).
+  
+  **Accepted data formats:**
+  - **`DataPoint[]`**: traditional array of objects/tuples `[x, y, size?]` or `{ x, y, size? }`
+  - **`XYArraysData`**: separate arrays `{ x: ArrayLike<number>, y: ArrayLike<number>, size?: ArrayLike<number> }` (see [`types.ts`](../../src/config/types.ts))
+  - **`InterleavedXYData`**: pre-interleaved typed array (`ArrayBufferView`) in `[x0, y0, x1, y1, ...]` order (see [`types.ts`](../../src/config/types.ts))
+  - **`OHLCDataPoint[]`**: for candlestick series only
+  
+  **Point-count rules:** 
+  - **`XYArraysData`**: uses `min(x.length, y.length)` — extra elements in either array are ignored
+  - **`InterleavedXYData`**: uses `floor(byteLength / (bytesPerElement * 2))` — odd trailing element is ignored
+  - **`DataView` interleaved is unsupported** and throws an error at runtime
+  
+  **Scatter size behavior:**
+  - **`XYArraysData.size`** participates in hit-testing, tooltips, and scatter point sizing
+  - **Interleaved typed arrays** do not carry per-point size; use `XYArraysData` if size is needed
+  
+  Internally, streaming appends are flushed via a unified scheduler (rAF-first with a small timeout fallback) and only do resampling work when zoom is active or a zoom change debounce matures. When `ChartGPUOptions.autoScroll === true`, this may also adjust the x-axis percent zoom window (see **Auto-scroll (streaming)** below). Pie series are not supported by streaming append. See [`ChartGPU.ts`](../../src/ChartGPU.ts) and [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
+  
+  **Streaming append examples:**
+  
+  ```typescript
+  // Append with Float32Array interleaved (GPU-friendly, zero-copy)
+  const interleaved = new Float32Array([101, 45.2, 102, 46.1, 103, 44.8]);
+  chart.appendData(0, interleaved);
+  
+  // Append with separate arrays (supports mixed precision, includes size)
+  const xyArrays = {
+    x: new Float64Array([104, 105, 106]),
+    y: new Float32Array([45.5, 46.0, 45.8]),
+    size: new Float32Array([8, 10, 12])  // optional scatter size
+  };
+  chart.appendData(0, xyArrays);
+  ```
+  
+  For end-to-end examples, see [`examples/live-streaming/`](../../examples/live-streaming/) and [`examples/candlestick-streaming/`](../../examples/candlestick-streaming/).
 - `resize(): void`: recomputes the canvas backing size / WebGPU canvas configuration from the container size; if anything changes, schedules a render.
 - `dispose(): void`: cancels any pending frame, disposes internal render resources, destroys the WebGPU context, and removes the canvas.
 - `on(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void`: registers an event listener. See [Event handling](interaction.md#event-handling) below.

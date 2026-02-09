@@ -21,11 +21,11 @@ import type { CandlestickRenderer } from '../../../renderers/createCandlestickRe
 import type { ReferenceLineRenderer } from '../../../renderers/createReferenceLineRenderer';
 import type { AnnotationMarkerRenderer } from '../../../renderers/createAnnotationMarkerRenderer';
 import type { DataStore } from '../../../data/createDataStore';
-import { isTupleDataPoint } from '../utils/dataPointUtils';
 import { clampInt } from '../utils/canvasUtils';
 import { clamp01 } from '../animation/animationHelpers';
 import { findVisibleRangeIndicesByX } from '../data/computeVisibleSlice';
 import { resolvePieRadiiCss } from '../utils/timeAxisUtils';
+import { getPointCount, getX } from '../../../data/cartesianData';
 
 export interface SeriesRenderers {
   lineRenderers: LineRenderer[];
@@ -139,8 +139,7 @@ export function prepareSeries(
     switch (s.type) {
       case 'area': {
         const baseline = s.baseline ?? defaultBaseline;
-        // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
-        renderers.areaRenderers[i].prepare(s, s.data as ReadonlyArray<DataPoint>, xScale, yScale, baseline);
+        renderers.areaRenderers[i].prepare(s, s.data, xScale, yScale, baseline);
         break;
       }
       case 'line': {
@@ -150,17 +149,15 @@ export function prepareSeries(
         // (Float32 ulp at ~1e12 is ~2e5), which can manifest as stroke shimmer during zoom.
         const xOffset = (() => {
           if (currentOptions.xAxis.type !== 'time') return 0;
-          // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
-          const d = s.data as ReadonlyArray<DataPoint>;
-          for (let k = 0; k < d.length; k++) {
-            const p = d[k]!
-            const x = isTupleDataPoint(p) ? p[0] : p.x;
+          const d = s.data;
+          const count = getPointCount(d);
+          for (let k = 0; k < count; k++) {
+            const x = getX(d, k);
             if (Number.isFinite(x)) return x;
           }
           return 0;
         })();
         if (!appendedGpuThisFrame.has(i)) {
-          // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
           dataStore.setSeries(i, s.data as ReadonlyArray<DataPoint>, { xOffset });
         }
         const buffer = dataStore.getSeriesBuffer(i);
@@ -193,8 +190,7 @@ export function prepareSeries(
             samplingThreshold: s.samplingThreshold,
           };
 
-          // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
-          renderers.areaRenderers[i].prepare(areaLike, areaLike.data as ReadonlyArray<DataPoint>, xScale, yScale, defaultBaseline);
+          renderers.areaRenderers[i].prepare(areaLike, areaLike.data, xScale, yScale, defaultBaseline);
         }
 
         break;
@@ -208,7 +204,6 @@ export function prepareSeries(
         if (s.mode === 'density') {
           // Density mode bins raw (unsampled) data for correctness, but limits compute to the visible
           // range when x is monotonic.
-          // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
           const rawData = (s.rawData ?? s.data) as ReadonlyArray<DataPoint>;
           const visible = findVisibleRangeIndicesByX(rawData, visibleXDomain.min, visibleXDomain.max);
 
@@ -234,8 +229,7 @@ export function prepareSeries(
           gpuSeriesKindByIndex[i] = 'other';
         } else {
           const animated = introP < 1 ? ({ ...s, color: withAlpha(s.color, introP) } as const) : s;
-          // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
-          renderers.scatterRenderers[i].prepare(animated, s.data as ReadonlyArray<DataPoint>, xScale, yScale, gridArea);
+          renderers.scatterRenderers[i].prepare(animated, s.data, xScale, yScale, gridArea);
         }
         break;
       }

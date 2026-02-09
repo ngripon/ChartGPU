@@ -26,6 +26,7 @@ import {
   getPointCount, 
   getX, 
   getY, 
+  getSize,
   computeRawBoundsFromCartesianData 
 } from '../data/cartesianData';
 import type { CartesianSeriesData } from '../config/types';
@@ -131,7 +132,7 @@ export interface RenderCoordinator {
    *
    * Appends are coalesced and flushed once per render frame.
    */
-  appendData(seriesIndex: number, newPoints: ReadonlyArray<DataPoint> | ReadonlyArray<OHLCDataPoint>): void;
+  appendData(seriesIndex: number, newPoints: CartesianSeriesData | ReadonlyArray<OHLCDataPoint>): void;
   /**
    * Gets the current “interaction x” in domain units (or `null` when inactive).
    *
@@ -221,50 +222,67 @@ const getPointXY = (p: DataPoint): { readonly x: number; readonly y: number } =>
 };
 
 /**
- * Helper: Convert CartesianSeriesData to mutable DataPoint[] array.
- * Used for runtime storage that supports streaming appends.
+ * Mutable columnar cartesian data store (runtime).
+ * - x, y: number[] - coordinate columns
+ * - size?: (number|undefined)[] - optional size column (aligned with x/y when present)
  */
-const cartesianDataToDataPointArray = (data: CartesianSeriesData): DataPoint[] => {
-  // If already a DataPoint array, clone it
-  if (Array.isArray(data)) {
-    return data.length === 0 ? [] : data.slice();
-  }
-
-  // Convert XYArraysData or InterleavedXYData to DataPoint[]
-  const n = getPointCount(data);
-  const out: DataPoint[] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = getX(data, i);
-    const y = getY(data, i);
-    out[i] = [x, y];
-  }
-  return out;
+type MutableXYColumns = {
+  x: number[];
+  y: number[];
+  size?: (number | undefined)[];
 };
 
-const extendBoundsWithDataPoints = (bounds: Bounds | null, points: ReadonlyArray<DataPoint>): Bounds | null => {
-  if (points.length === 0) return bounds;
+/**
+ * Helper: Convert CartesianSeriesData to mutable columnar format for runtime storage.
+ * Used for streaming appends without per-point allocations.
+ */
+const cartesianDataToMutableColumns = (data: CartesianSeriesData): MutableXYColumns => {
+  const n = getPointCount(data);
+  if (n === 0) return { x: [], y: [] };
 
-  let b = bounds;
-  if (!b) {
-    // Try to seed from the appended points.
-    const seeded = computeRawBoundsFromCartesianData(points);
-    if (!seeded) return bounds;
-    b = seeded;
+  const x: number[] = new Array(n);
+  const y: number[] = new Array(n);
+  let hasSizeValues = false;
+  let size: (number | undefined)[] | undefined;
+
+  // Check if any point has a size value
+  for (let i = 0; i < n; i++) {
+    x[i] = getX(data, i);
+    y[i] = getY(data, i);
+    const s = getSize(data, i);
+    if (s !== undefined) {
+      hasSizeValues = true;
+      if (!size) {
+        // Backfill with undefined for prior points
+        size = new Array(i);
+      }
+      size[i] = s;
+    } else if (size) {
+      size[i] = undefined;
+    }
   }
 
-  let xMin = b.xMin;
-  let xMax = b.xMax;
-  let yMin = b.yMin;
-  let yMax = b.yMax;
-
-  for (let i = 0; i < points.length; i++) {
-    const { x, y } = getPointXY(points[i]!);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
+  if (hasSizeValues && size) {
+    return { x, y, size };
   }
+
+  return { x, y };
+};
+
+/**
+ * Extends existing bounds with new CartesianSeriesData.
+ * Avoids per-point allocations for typed arrays by using direct accessors.
+ */
+const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSeriesData): Bounds | null => {
+  const newBounds = computeRawBoundsFromCartesianData(data);
+  if (!newBounds) return bounds;
+  if (!bounds) return newBounds;
+
+  // Merge the two bounds
+  let xMin = Math.min(bounds.xMin, newBounds.xMin);
+  let xMax = Math.max(bounds.xMax, newBounds.xMax);
+  let yMin = Math.min(bounds.yMin, newBounds.yMin);
+  let yMax = Math.max(bounds.yMax, newBounds.yMax);
 
   // Keep bounds usable for downstream scale derivation.
   if (xMin === xMax) xMax = xMin + 1;
@@ -1360,10 +1378,12 @@ export function createRenderCoordinator(
   const warnedPieAppendSeries = new Set<number>();
   const warnedSamplingDefeatsFastPath = new Set<number>();
 
-  // Coordinator-owned runtime series store (cartesian only).
-  // - `runtimeRawDataByIndex[i]` owns a mutable array for streaming appends.
-  // - `runtimeRawBoundsByIndex[i]` tracks raw bounds for axis auto-bounds and zoom mapping.
-  let runtimeRawDataByIndex: Array<DataPoint[] | OHLCDataPoint[] | null> = new Array(options.series.length).fill(null);
+  // Coordinator-owned runtime series store.
+  // - `runtimeRawDataByIndex[i]` owns mutable columnar data (MutableXYColumns) for cartesian series,
+  //   or mutable OHLCDataPoint[] for candlestick series. Supports efficient streaming appends
+  //   without per-point object allocations.
+  // - `runtimeRawBoundsByIndex[i]` is incrementally updated to keep scale/bounds derivation cheap.
+  let runtimeRawDataByIndex: Array<MutableXYColumns | OHLCDataPoint[] | null> = new Array(options.series.length).fill(null);
   let runtimeRawBoundsByIndex: Array<Bounds | null> = new Array(options.series.length).fill(null);
 
   // Baseline sampled series list derived from runtime raw data (used as the “full span” baseline).
@@ -1397,7 +1417,7 @@ export function createRenderCoordinator(
 
   // Cache for sampled data with buffer zones - enables fast slicing during pan without resampling.
   interface SampledDataCache {
-    data: ReadonlyArray<DataPoint> | ReadonlyArray<OHLCDataPoint>;
+    data: CartesianSeriesData | ReadonlyArray<OHLCDataPoint>;
     cachedRange: { min: number; max: number };
     timestamp: number;
   }
@@ -1418,7 +1438,8 @@ export function createRenderCoordinator(
   let sliceRenderSeriesDue = false;
 
   // Coalesced streaming appends (flushed at the start of `render()`).
-  const pendingAppendByIndex = new Map<number, Array<DataPoint | OHLCDataPoint>>();
+  // Each entry is an array of batches (preserving original format to avoid per-point allocations).
+  const pendingAppendByIndex = new Map<number, Array<CartesianSeriesData | ReadonlyArray<OHLCDataPoint>>>();
 
   // Tracks what the DataStore currently represents for each series index.
   // Used to decide whether `appendSeries(...)` is a correct fast-path.
@@ -1690,8 +1711,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
     let didAppendAny = false;
 
-    for (const [seriesIndex, points] of pendingAppendByIndex) {
-      if (points.length === 0) continue;
+    for (const [seriesIndex, batches] of pendingAppendByIndex) {
+      if (batches.length === 0) continue;
       const s = currentOptions.series[seriesIndex];
       if (!s || s.type === 'pie') continue;
       didAppendAny = true;
@@ -1706,52 +1727,80 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
           runtimeRawBoundsByIndex[seriesIndex] = s.rawBounds ?? null;
         }
 
-        const ohlcPoints = points as unknown as ReadonlyArray<OHLCDataPoint>;
-        raw.push(...ohlcPoints);
-        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithOHLCDataPoints(
-          runtimeRawBoundsByIndex[seriesIndex],
-          ohlcPoints
-        );
+        // Process each batch of OHLC data
+        for (const batch of batches) {
+          const ohlcPoints = batch as ReadonlyArray<OHLCDataPoint>;
+          raw.push(...ohlcPoints);
+          runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithOHLCDataPoints(
+            runtimeRawBoundsByIndex[seriesIndex],
+            ohlcPoints
+          );
+        }
       } else {
         // Handle other cartesian series (line, area, bar, scatter).
-        let raw = runtimeRawDataByIndex[seriesIndex] as DataPoint[] | null;
+        let raw = runtimeRawDataByIndex[seriesIndex] as MutableXYColumns | null;
         if (!raw) {
           const seed = (s.rawData ?? s.data) as CartesianSeriesData;
-          raw = cartesianDataToDataPointArray(seed);
+          raw = cartesianDataToMutableColumns(seed);
           runtimeRawDataByIndex[seriesIndex] = raw;
           runtimeRawBoundsByIndex[seriesIndex] = s.rawBounds ?? computeRawBoundsFromCartesianData(seed);
         }
 
-        const dataPoints = points as unknown as ReadonlyArray<DataPoint>;
-        
         // Optional fast-path: if the GPU buffer currently represents the full, unsampled line series,
         // we can append just the new points to the existing GPU buffer (no full re-upload).
         const canUseFastPath =
           s.type === 'line' && s.sampling === 'none' && isFullSpanZoomBefore && gpuSeriesKindByIndex[seriesIndex] === 'fullRawLine';
 
-        if (canUseFastPath) {
-          try {
-            dataStore.appendSeries(seriesIndex, dataPoints);
-            appendedGpuThisFrame.add(seriesIndex);
-          } catch {
-            // If the DataStore has not been initialized for this index (or any other error occurs),
-            // fall back to the normal full upload path later in render().
+        // Process each batch of cartesian data
+        for (const batch of batches) {
+          const cartesianData = batch as CartesianSeriesData;
+
+          if (canUseFastPath) {
+            try {
+              // Pass CartesianSeriesData directly to DataStore (avoids per-point allocations for typed arrays)
+              dataStore.appendSeries(seriesIndex, cartesianData);
+              appendedGpuThisFrame.add(seriesIndex);
+            } catch {
+              // If the DataStore has not been initialized for this index (or any other error occurs),
+              // fall back to the normal full upload path later in render().
+            }
+          } else if (s.type === 'line' && s.sampling !== 'none' && !warnedSamplingDefeatsFastPath.has(seriesIndex)) {
+            // Warn users that sampling defeats the incremental append optimization
+            warnedSamplingDefeatsFastPath.add(seriesIndex);
+            console.warn(
+              `[ChartGPU] appendData() on series ${seriesIndex} with sampling='${s.sampling}' causes full buffer re-upload every frame. ` +
+                `For optimal streaming performance, use sampling='none'. ` +
+                `See docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md for details.`
+            );
           }
-        } else if (s.type === 'line' && s.sampling !== 'none' && !warnedSamplingDefeatsFastPath.has(seriesIndex)) {
-          // Warn users that sampling defeats the incremental append optimization
-          warnedSamplingDefeatsFastPath.add(seriesIndex);
-          console.warn(
-            `[ChartGPU] appendData() on series ${seriesIndex} with sampling='${s.sampling}' causes full buffer re-upload every frame. ` +
-              `For optimal streaming performance, use sampling='none'. ` +
-              `See docs/internal/INCREMENTAL_APPEND_OPTIMIZATION.md for details.`
+
+          // Update runtime columnar storage (needed for resampling/slicing in non-fast-path cases).
+          // Append each batch into MutableXYColumns using getPointCount/getX/getY/getSize accessors.
+          const n = getPointCount(cartesianData);
+          const rawLenBefore = raw.x.length;
+          for (let i = 0; i < n; i++) {
+            raw.x.push(getX(cartesianData, i));
+            raw.y.push(getY(cartesianData, i));
+            
+            const sizeValue = getSize(cartesianData, i);
+            // Maintain size alignment: if owned.size exists or new batch has any size, keep aligned
+            if (sizeValue !== undefined) {
+              if (!raw.size) {
+                // Backfill undefined for prior points that didn't have size values
+                raw.size = new Array(rawLenBefore + i);
+              }
+              raw.size.push(sizeValue);
+            } else if (raw.size) {
+              raw.size.push(undefined);
+            }
+          }
+
+          // Update bounds using efficient CartesianSeriesData accessor
+          runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithCartesianData(
+            runtimeRawBoundsByIndex[seriesIndex],
+            cartesianData
           );
         }
-
-        raw.push(...dataPoints);
-        runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithDataPoints(
-          runtimeRawBoundsByIndex[seriesIndex],
-          dataPoints
-        );
       }
 
       // Invalidate cache for this series since data has changed
@@ -2175,10 +2224,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         continue;
       }
 
-      const raw =
-        (runtimeRawDataByIndex[i] as DataPoint[] | null) ??
-        cartesianDataToDataPointArray((s.rawData ?? s.data) as CartesianSeriesData);
-      maxPoints = Math.max(maxPoints, raw.length);
+      // Cartesian series: runtime store is MutableXYColumns
+      const rawCartesian =
+        (runtimeRawDataByIndex[i] as MutableXYColumns | null) ??
+        null;
+      const pointCount = rawCartesian ? rawCartesian.x.length : getPointCount((s.rawData ?? s.data) as CartesianSeriesData);
+      maxPoints = Math.max(maxPoints, pointCount);
     }
 
     if (maxPoints < 2) return null;
@@ -2282,8 +2333,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
 
       const raw = (s.rawData ?? s.data) as CartesianSeriesData;
-      // Coordinator-owned: convert to mutable DataPoint[] array (streaming appends mutate this).
-      const owned = cartesianDataToDataPointArray(raw);
+      // Coordinator-owned: convert to mutable columnar format (streaming appends mutate this).
+      const owned = cartesianDataToMutableColumns(raw);
       runtimeRawDataByIndex[i] = owned;
       runtimeRawBoundsByIndex[i] = s.rawBounds ?? computeRawBoundsFromCartesianData(raw);
     }
@@ -2310,12 +2361,13 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         continue;
       }
 
-      const raw =
-        (runtimeRawDataByIndex[i] as DataPoint[] | null) ?? 
-        cartesianDataToDataPointArray((s.rawData ?? s.data) as CartesianSeriesData);
+      // Cartesian series: runtime store is MutableXYColumns (compatible with CartesianSeriesData at runtime)
+      const rawCartesian: CartesianSeriesData =
+        ((runtimeRawDataByIndex[i] as MutableXYColumns | null) as CartesianSeriesData) ?? 
+        ((s.rawData ?? s.data) as CartesianSeriesData);
       const bounds = runtimeRawBoundsByIndex[i] ?? s.rawBounds ?? undefined;
-      const baselineSampled = sampleSeriesDataPoints(raw, s.sampling, s.samplingThreshold);
-      next[i] = { ...s, rawData: raw, rawBounds: bounds, data: baselineSampled };
+      const baselineSampled = sampleSeriesDataPoints(rawCartesian, s.sampling, s.samplingThreshold);
+      next[i] = { ...s, rawData: rawCartesian, rawBounds: bounds, data: baselineSampled };
     }
     runtimeBaseSeries = next;
   };
@@ -2455,7 +2507,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
         // Store sampled data in cache with buffered range
         lastSampledData[i] = {
-          data: sampled as unknown as ReadonlyArray<DataPoint>,
+          data: sampled,
           cachedRange: { min: bufferedMin, max: bufferedMax },
           timestamp: Date.now()
         };
@@ -2467,11 +2519,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       }
 
       // Cartesian series (line, area, bar, scatter).
-      const rawData =
-        (runtimeRawDataByIndex[i] as DataPoint[] | null) ?? 
-        cartesianDataToDataPointArray((s.rawData ?? s.data) as CartesianSeriesData);
+      // Runtime store is MutableXYColumns (compatible with CartesianSeriesData at runtime)
+      const rawCartesian: CartesianSeriesData =
+        ((runtimeRawDataByIndex[i] as MutableXYColumns | null) as CartesianSeriesData) ?? 
+        ((s.rawData ?? s.data) as CartesianSeriesData);
       // Slice to buffered range for sampling
-      const bufferedRaw = sliceVisibleRangeByX(rawData, bufferedMin, bufferedMax);
+      const bufferedRaw = sliceVisibleRangeByX(rawCartesian, bufferedMin, bufferedMax);
 
       const sampling = s.sampling;
       const baseThreshold = s.samplingThreshold;
@@ -2480,17 +2533,17 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       const maxTarget = Math.min(MAX_TARGET_POINTS_ABS, Math.max(MIN_TARGET_POINTS, baseT * MAX_TARGET_MULTIPLIER));
       const target = clampInt(Math.round(baseT / spanFracSafe), MIN_TARGET_POINTS, maxTarget);
 
-      const sampled = sampleSeriesDataPoints(bufferedRaw as CartesianSeriesData, sampling, target);
+      const sampled = sampleSeriesDataPoints(bufferedRaw, sampling, target);
 
       // Store sampled data in cache with buffered range
       lastSampledData[i] = {
-        data: sampled as unknown as ReadonlyArray<DataPoint>,
+        data: sampled,
         cachedRange: { min: bufferedMin, max: bufferedMax },
         timestamp: Date.now()
       };
 
       // Slice to actual visible range for renderSeries
-      const visibleSampled = sliceVisibleRangeByX(sampled as CartesianSeriesData, visibleX.min, visibleX.max);
+      const visibleSampled = sliceVisibleRangeByX(sampled, visibleX.min, visibleX.max);
       next[i] = { ...s, data: visibleSampled };
     }
 
@@ -2887,7 +2940,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     assertNotDisposed();
     if (!Number.isFinite(seriesIndex)) return;
     if (seriesIndex < 0 || seriesIndex >= currentOptions.series.length) return;
-    if (!newPoints || newPoints.length === 0) return;
+    if (!newPoints) return;
 
     const s = currentOptions.series[seriesIndex]!;
     if (s.type === 'pie') {
@@ -2901,12 +2954,18 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       return;
     }
 
+    // Check point count based on format (avoid assuming .length exists for all types)
+    const pointCount = s.type === 'candlestick'
+      ? (newPoints as ReadonlyArray<OHLCDataPoint>).length
+      : getPointCount(newPoints as CartesianSeriesData);
+    if (pointCount === 0) return;
+
+    // Store batches in their original format to avoid per-point allocations for typed arrays.
     const existing = pendingAppendByIndex.get(seriesIndex);
     if (existing) {
-      existing.push(...(newPoints as Array<DataPoint | OHLCDataPoint>));
+      existing.push(newPoints);
     } else {
-      // Copy into a mutable staging array so repeated appends coalesce without extra allocations.
-      pendingAppendByIndex.set(seriesIndex, Array.from(newPoints as Array<DataPoint | OHLCDataPoint>));
+      pendingAppendByIndex.set(seriesIndex, [newPoints]);
     }
 
     // Coalesce appends + any required resampling + GPU streaming updates into a single flush.
@@ -2951,13 +3010,14 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
             case 'line':
             case 'area':
             case 'bar':
-            case 'scatter':
+            case 'scatter': {
+              // Cartesian series: use getPointCount for all CartesianSeriesData formats
+              const dataLength = getPointCount(s.data as CartesianSeriesData);
+              if (dataLength > 0) return true;
+              break;
+            }
             case 'candlestick': {
-              // TODO(step 2): normalize CartesianSeriesData to ReadonlyArray<DataPoint>
-              const dataLength =
-                Array.isArray(s.data) || ArrayBuffer.isView(s.data)
-                  ? (s.data as ArrayLike<unknown>).length
-                  : (s.data as { x: ArrayLike<unknown> }).x.length;
+              const dataLength = (s.data as ReadonlyArray<OHLCDataPoint>).length;
               if (dataLength > 0) return true;
               break;
             }

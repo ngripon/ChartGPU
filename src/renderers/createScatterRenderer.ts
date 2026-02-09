@@ -1,16 +1,16 @@
 import scatterWgsl from '../shaders/scatter.wgsl?raw';
 import type { ResolvedScatterSeriesConfig } from '../config/OptionResolver';
-import type { DataPoint, DataPointTuple, ScatterPointTuple } from '../config/types';
+import type { CartesianSeriesData } from '../config/types';
 import type { LinearScale } from '../utils/scales';
 import { parseCssColorToRgba01 } from '../utils/colors';
 import type { GridArea } from './createGridRenderer';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { getPointCount, getX, getY, getSize, computeRawBoundsFromCartesianData } from '../data/cartesianData';
 
 export interface ScatterRenderer {
   prepare(
     seriesConfig: ResolvedScatterSeriesConfig,
-    // TODO(step 2): This will accept normalized ReadonlyArray<DataPoint>
-    data: ReadonlyArray<DataPoint>,
+    data: CartesianSeriesData,
     xScale: LinearScale,
     yScale: LinearScale,
     gridArea?: GridArea
@@ -48,54 +48,6 @@ const nextPow2 = (v: number): number => {
   return 2 ** Math.ceil(Math.log2(n));
 };
 
-const isTupleDataPoint = (point: DataPoint): point is DataPointTuple => Array.isArray(point);
-
-const getPointXY = (point: DataPoint): { readonly x: number; readonly y: number } => {
-  if (isTupleDataPoint(point)) return { x: point[0], y: point[1] };
-  return { x: point.x, y: point.y };
-};
-
-const getPointSizeCssPx = (point: DataPoint): number | null => {
-  if (isTupleDataPoint(point)) {
-    const s = point[2];
-    return typeof s === 'number' && Number.isFinite(s) ? s : null;
-  }
-  const s = point.size;
-  return typeof s === 'number' && Number.isFinite(s) ? s : null;
-};
-
-const toScatterTuple = (point: DataPoint): ScatterPointTuple => {
-  if (isTupleDataPoint(point)) return point;
-  return [point.x, point.y, point.size] as const;
-};
-
-const computeDataBounds = (
-  data: ReadonlyArray<DataPoint>
-): { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number } => {
-  let xMin = Number.POSITIVE_INFINITY;
-  let xMax = Number.NEGATIVE_INFINITY;
-  let yMin = Number.POSITIVE_INFINITY;
-  let yMax = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < data.length; i++) {
-    const { x, y } = getPointXY(data[i]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
-    return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
-  }
-
-  // Avoid degenerate domains for affine derivation (handled later too, but keep stable samples).
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-
-  return { xMin, xMax, yMin, yMax };
-};
 
 const computeClipAffineFromScale = (
   scale: LinearScale,
@@ -259,7 +211,8 @@ export function createScatterRenderer(device: GPUDevice, options?: ScatterRender
   const prepare: ScatterRenderer['prepare'] = (seriesConfig, data, xScale, yScale, gridArea) => {
     assertNotDisposed();
 
-    const { xMin, xMax, yMin, yMax } = computeDataBounds(data);
+    const bounds = computeRawBoundsFromCartesianData(data);
+    const { xMin, xMax, yMin, yMax } = bounds ?? { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const { a: ax, b: bx } = computeClipAffineFromScale(xScale, xMin, xMax);
     const { a: ay, b: by } = computeClipAffineFromScale(yScale, yMin, yMax);
 
@@ -285,26 +238,35 @@ export function createScatterRenderer(device: GPUDevice, options?: ScatterRender
     const hasValidDpr = dpr > 0 && Number.isFinite(dpr);
 
     const seriesSymbolSize = seriesConfig.symbolSize;
+    // Scratch tuple for symbolSize function: reuse to avoid per-point allocations
+    const scratchTuple: [number, number, number | undefined] = [0, 0, undefined];
+    
     const getSeriesSizeCssPx =
       typeof seriesSymbolSize === 'function'
-        ? (point: DataPoint): number => {
-            const v = seriesSymbolSize(toScatterTuple(point));
+        ? (x: number, y: number, size: number | undefined): number => {
+            scratchTuple[0] = x;
+            scratchTuple[1] = y;
+            scratchTuple[2] = size;
+            const v = seriesSymbolSize(scratchTuple);
             return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_SCATTER_RADIUS_CSS_PX;
           }
         : typeof seriesSymbolSize === 'number' && Number.isFinite(seriesSymbolSize)
-          ? (): number => seriesSymbolSize
-          : (): number => DEFAULT_SCATTER_RADIUS_CSS_PX;
+          ? (_x: number, _y: number, _size: number | undefined): number => seriesSymbolSize
+          : (_x: number, _y: number, _size: number | undefined): number => DEFAULT_SCATTER_RADIUS_CSS_PX;
 
-    ensureCpuInstanceCapacityFloats(data.length * INSTANCE_STRIDE_FLOATS);
+    const count = getPointCount(data);
+    ensureCpuInstanceCapacityFloats(count * INSTANCE_STRIDE_FLOATS);
     const f32 = cpuInstanceStagingF32;
     let outFloats = 0;
 
-    for (let i = 0; i < data.length; i++) {
-      const p = data[i];
-      const { x, y } = getPointXY(p);
+    for (let i = 0; i < count; i++) {
+      const x = getX(data, i);
+      const y = getY(data, i);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 
-      const sizeCss = getPointSizeCssPx(p) ?? getSeriesSizeCssPx(p);
+      // Per-point size from data overrides series.symbolSize
+      const pointSize = getSize(data, i);
+      const sizeCss = pointSize ?? getSeriesSizeCssPx(x, y, pointSize);
       const radiusCss = Number.isFinite(sizeCss) ? Math.max(0, sizeCss) : DEFAULT_SCATTER_RADIUS_CSS_PX;
       const radiusDevicePx = hasValidDpr ? radiusCss * dpr : radiusCss;
       if (!(radiusDevicePx > 0)) continue;

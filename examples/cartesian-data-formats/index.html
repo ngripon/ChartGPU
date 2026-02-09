@@ -64,6 +64,42 @@
     .controls input[type="radio"] {
       cursor: pointer;
     }
+    .streaming-controls {
+      margin: 12px 0;
+      padding: 12px;
+      background: #1a1a2e;
+      border-radius: 8px;
+      border: 1px solid #333;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+    .streaming-controls button {
+      padding: 8px 20px;
+      background: #4a9eff;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    .streaming-controls button:hover {
+      background: #3a8eef;
+    }
+    .streaming-controls button.active {
+      background: #ff4ab0;
+    }
+    .streaming-controls button.active:hover {
+      background: #ef3aa0;
+    }
+    .status-label {
+      color: #aaa;
+      font-size: 0.9rem;
+    }
+    .status-label strong {
+      color: #4a9eff;
+    }
     .chart-shell {
       border: 1px solid #333;
       border-radius: 12px;
@@ -132,7 +168,8 @@
       <h1>Cartesian Data Formats</h1>
       <p>
         Demonstrates three CartesianSeriesData input formats: XYArraysData (Float64Arrays), InterleavedXYData (Float32Array with subarray view), 
-        and traditional array-of-objects. Toggle between formats to compare performance and ergonomics with 100k points per series.
+        and traditional array-of-objects. Toggle between formats to compare performance and ergonomics with 100k points per series. 
+        Test streaming data with typed arrays using the controls below.
       </p>
       <a class="back" href="../index.html">← Back to examples</a>
     </header>
@@ -151,6 +188,16 @@
         <input type="radio" name="series1-format" value="array" />
         Array of Objects
       </label>
+    </div>
+
+    <div class="streaming-controls">
+      <button id="streamToggle">Start Streaming</button>
+      <div class="status-label">
+        Appended: <strong id="appendedCount">0</strong> points
+      </div>
+      <div class="status-label">
+        FPS: <strong id="fpsCounter">0</strong>
+      </div>
     </div>
 
     <div class="chart-shell">

@@ -1,9 +1,9 @@
 import lineWgsl from '../shaders/line.wgsl?raw';
 import type { ResolvedLineSeriesConfig } from '../config/OptionResolver';
-import type { DataPoint, DataPointTuple } from '../config/types';
 import type { LinearScale } from '../utils/scales';
 import { parseCssColorToRgba01 } from '../utils/colors';
 import { createRenderPipeline, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { getPointCount, computeRawBoundsFromCartesianData } from '../data/cartesianData';
 
 export interface LineRenderer {
   prepare(
@@ -35,42 +35,6 @@ const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 const parseSeriesColorToRgba01 = (color: string): Rgba =>
   parseCssColorToRgba01(color) ?? ([0, 0, 0, 1] as const);
 
-const isTupleDataPoint = (
-  point: DataPoint
-): point is DataPointTuple => Array.isArray(point);
-
-const getPointXY = (point: DataPoint): { readonly x: number; readonly y: number } => {
-  if (isTupleDataPoint(point)) return { x: point[0], y: point[1] };
-  return { x: point.x, y: point.y };
-};
-
-const computeDataBounds = (
-  data: ReadonlyArray<DataPoint>
-): { readonly xMin: number; readonly xMax: number; readonly yMin: number; readonly yMax: number } => {
-  let xMin = Number.POSITIVE_INFINITY;
-  let xMax = Number.NEGATIVE_INFINITY;
-  let yMin = Number.POSITIVE_INFINITY;
-  let yMax = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < data.length; i++) {
-    const { x, y } = getPointXY(data[i]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-
-  if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
-    return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
-  }
-
-  // Avoid degenerate domains for affine derivation (handled later too, but keep stable samples).
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-
-  return { xMin, xMax, yMin, yMax };
-};
 
 const computeClipAffineFromScale = (
   scale: LinearScale,
@@ -177,11 +141,10 @@ export function createLineRenderer(device: GPUDevice, options?: LineRendererOpti
     assertNotDisposed();
 
     currentVertexBuffer = dataBuffer;
-    // TODO(step 2): data will already be normalized to ReadonlyArray<DataPoint>
-    const dataArray = seriesConfig.data as ReadonlyArray<DataPoint>;
-    currentVertexCount = dataArray.length;
+    currentVertexCount = getPointCount(seriesConfig.data);
 
-    const { xMin, xMax, yMin, yMax } = computeDataBounds(dataArray);
+    const bounds = computeRawBoundsFromCartesianData(seriesConfig.data);
+    const { xMin, xMax, yMin, yMax } = bounds ?? { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const { a: ax, b: bx } = computeClipAffineFromScale(xScale, xMin, xMax);
     const { a: ay, b: by } = computeClipAffineFromScale(yScale, yMin, yMax);
 
