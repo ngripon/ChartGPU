@@ -248,18 +248,55 @@ export function computeRawBoundsFromCartesianData(data: CartesianSeriesData): Bo
   let yMin = Number.POSITIVE_INFINITY;
   let yMax = Number.NEGATIVE_INFINITY;
   
-  const count = getPointCount(data);
-  
-  for (let i = 0; i < count; i++) {
-    const x = getX(data, i);
-    const y = getY(data, i);
+  // Hoist type detection outside loop to avoid per-point type checks
+  if (isXYArraysData(data)) {
+    // Fast path for XYArraysData
+    const count = Math.min(data.x.length, data.y.length);
+    for (let i = 0; i < count; i++) {
+      const x = data.x[i]!;
+      const y = data.y[i]!;
+      
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  } else if (isInterleavedXYData(data)) {
+    // Fast path for InterleavedXYData
+    if (data instanceof DataView) {
+      throw new Error('DataView is not supported for InterleavedXYData. Use typed arrays (Float32Array, Float64Array, etc.).');
+    }
     
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const arr = data as TypedArray;
+    const count = Math.floor(arr.length / 2);
     
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
+    for (let i = 0; i < count; i++) {
+      const x = arr[i * 2]!;
+      const y = arr[i * 2 + 1]!;
+      
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  } else {
+    // Array<DataPoint> path: use helper functions
+    const count = data.length;
+    for (let i = 0; i < count; i++) {
+      const x = getX(data, i);
+      const y = getY(data, i);
+      
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
   }
   
   if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {

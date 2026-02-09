@@ -167,7 +167,8 @@ async function main() {
     }
   };
 
-   const options: ChartGPUOptions = {
+  // Maintain current options for safe updates
+  let currentOptions: ChartGPUOptions = {
     grid: { left: 70, right: 24, top: 24, bottom: 56 },
     xAxis: { type: 'value', min: 0, name: 'x' }, // No max - allow dynamic bounds
     yAxis: { type: 'value', min: -1.2, max: 1.2, name: 'y' },
@@ -175,6 +176,10 @@ async function main() {
     animation: { duration: 300, easing: 'cubicOut' },
     legend: { show: true, position: 'top' },
     tooltip: { show: true, trigger: 'axis' },
+    dataZoom: [
+      { type: 'inside' }, // Mouse wheel zoom + shift+drag or middle-button drag to pan
+      { type: 'slider' }, // Slider control at bottom
+    ],
     series: [
       {
         type: 'line',
@@ -212,13 +217,36 @@ async function main() {
     ],
   };
 
-  const chart = await ChartGPU.create(container, options);
+  const chart = await ChartGPU.create(container, currentOptions);
 
   // Streaming state
   let isStreaming = false;
+  let hasEverStreamed = false; // Track if streaming has ever started
   let streamingIntervalId: number | null = null;
   let currentX = X_DOMAIN_MAX; // Start after static data
   let totalAppendedPoints = 0;
+
+  // Pre-allocate a small pool of streaming buffers to avoid per-append allocations.
+  // Important: ChartGPU may flush appends on the next render tick, so we must not
+  // mutate a buffer that might still be referenced by a pending append payload.
+  const STREAMING_BUFFER_POOL_SIZE = 8;
+  let streamingPoolCursor = 0;
+  const streamingInterleavedPool = Array.from(
+    { length: STREAMING_BUFFER_POOL_SIZE },
+    () => new Float32Array(STREAMING_BATCH_SIZE * 2)
+  );
+  const streamingXPool = Array.from(
+    { length: STREAMING_BUFFER_POOL_SIZE },
+    () => new Float32Array(STREAMING_BATCH_SIZE)
+  );
+  const streamingYPool = Array.from(
+    { length: STREAMING_BUFFER_POOL_SIZE },
+    () => new Float32Array(STREAMING_BATCH_SIZE)
+  );
+  const streamingSizePool = Array.from(
+    { length: STREAMING_BUFFER_POOL_SIZE },
+    () => new Float32Array(STREAMING_BATCH_SIZE)
+  );
 
   const streamToggleButton = document.getElementById('streamToggle') as HTMLButtonElement;
   const appendedCountSpan = document.getElementById('appendedCount') as HTMLSpanElement;
@@ -228,6 +256,11 @@ async function main() {
   let frameCount = 0;
   let lastFPSUpdate = performance.now();
   const fpsCounterSpan = document.getElementById('fpsCounter') as HTMLSpanElement;
+
+  // Zoom tracking state (polled every 100ms instead of per-frame to reduce overhead)
+  let zoomIntervalId: number | null = null;
+  const zoomRangeSpan = document.getElementById('zoomRange') as HTMLSpanElement;
+  const zoomResetButton = document.getElementById('zoomReset') as HTMLButtonElement;
 
   const updateAppendedCount = () => {
     if (appendedCountSpan) {
@@ -254,41 +287,76 @@ async function main() {
     fpsAnimationFrameId = requestAnimationFrame(trackFPS);
   };
 
+  // Update zoom range display (polled every 100ms to reduce per-frame overhead)
+  const updateZoomRangeDisplay = () => {
+    if (zoomRangeSpan) {
+      const range = chart.getZoomRange();
+      if (range) {
+        zoomRangeSpan.textContent = `${Math.round(range.start)}–${Math.round(range.end)}%`;
+      } else {
+        // Data zoom disabled (shouldn't happen in this example, but keep it safe)
+        zoomRangeSpan.textContent = '—';
+      }
+    }
+  };
+  
+  // Poll zoom state every 100ms (vs per-frame) to reduce overhead while keeping UI responsive
+  const startZoomTracking = () => {
+    updateZoomRangeDisplay(); // Initial update
+    zoomIntervalId = window.setInterval(updateZoomRangeDisplay, 100);
+  };
+
+  // Reset zoom button handler
+  if (zoomResetButton) {
+    zoomResetButton.addEventListener('click', () => {
+      chart.setZoomRange(0, 100);
+    });
+  }
+
   const startStreaming = () => {
     if (isStreaming) return;
     isStreaming = true;
+    
+    // On first streaming start, disable animation to prevent legend toggles from retriggering intro
+    if (!hasEverStreamed) {
+      hasEverStreamed = true;
+      // Update currentOptions and apply with full options to avoid resetting series/state
+      currentOptions = { ...currentOptions, animation: false };
+      chart.setOption(currentOptions);
+    }
+    
     if (streamToggleButton) {
       streamToggleButton.textContent = 'Stop Streaming';
       streamToggleButton.classList.add('active');
     }
 
     streamingIntervalId = window.setInterval(() => {
-      // Generate interleaved data for series 3 (line)
-      const interleavedData = new Float32Array(STREAMING_BATCH_SIZE * 2);
+      // Reuse pre-allocated buffers (from a pool) for near zero-allocation streaming
+      const poolIdx = streamingPoolCursor;
+      streamingPoolCursor = (streamingPoolCursor + 1) % STREAMING_BUFFER_POOL_SIZE;
+
+      const streamingInterleavedBuffer = streamingInterleavedPool[poolIdx]!;
+      const streamingXBuffer = streamingXPool[poolIdx]!;
+      const streamingYBuffer = streamingYPool[poolIdx]!;
+      const streamingSizeBuffer = streamingSizePool[poolIdx]!;
+
       for (let i = 0; i < STREAMING_BATCH_SIZE; i++) {
         const x = currentX + (i / STREAMING_BATCH_SIZE) * 0.5; // Monotonically increasing
         const y = Math.sin(x * 2) * 0.6; // Different frequency than static series
-        interleavedData[i * 2] = x;
-        interleavedData[i * 2 + 1] = y;
-      }
-
-      // Generate XYArrays data with size for series 4 (scatter)
-      const xData = new Float32Array(STREAMING_BATCH_SIZE);
-      const yData = new Float32Array(STREAMING_BATCH_SIZE);
-      const sizeData = new Float32Array(STREAMING_BATCH_SIZE);
-      for (let i = 0; i < STREAMING_BATCH_SIZE; i++) {
-        const x = currentX + (i / STREAMING_BATCH_SIZE) * 0.5; // Same x as line series
-        const y = Math.cos(x * 1.5) * 0.7; // Cosine wave
-        // Varying size based on position (larger at peaks)
+        streamingInterleavedBuffer[i * 2] = x;
+        streamingInterleavedBuffer[i * 2 + 1] = y;
+        
+        // Also compute scatter data in same loop
+        const y2 = Math.cos(x * 1.5) * 0.7; // Cosine wave
         const sizeVariation = Math.abs(Math.sin(x * 3)) * 8 + 2; // Range: 2-10
-        xData[i] = x;
-        yData[i] = y;
-        sizeData[i] = sizeVariation;
+        streamingXBuffer[i] = x;
+        streamingYBuffer[i] = y2;
+        streamingSizeBuffer[i] = sizeVariation;
       }
 
-      // Append to both streaming series
-      chart.appendData(2, interleavedData); // Series 3: line with InterleavedXYData
-      chart.appendData(3, { x: xData, y: yData, size: sizeData }); // Series 4: scatter with size
+      // Append to both streaming series (passing same buffer references)
+      chart.appendData(2, streamingInterleavedBuffer); // Series 3: line with InterleavedXYData
+      chart.appendData(3, { x: streamingXBuffer, y: streamingYBuffer, size: streamingSizeBuffer }); // Series 4: scatter with size
 
       currentX += 0.5; // Advance x for next batch
       totalAppendedPoints += STREAMING_BATCH_SIZE;
@@ -339,45 +407,47 @@ async function main() {
       
       series1Format = newFormat;
       
-      // Update chart with new data format
-      // Safe to replace all series since streaming is stopped
-      chart.setOption({
-        series: [
-          {
-            type: 'line',
-            name: `Series 1: ${getFormatLabel(series1Format)}`,
-            data: getSeries1Data(),
-            color: '#4a9eff',
-            lineStyle: { width: 2, opacity: 0.9 },
-            sampling: 'lttb',
-            samplingThreshold: 5000,
-          },
-          {
-            type: 'line',
-            name: 'Series 2: InterleavedXYData (with subarray)',
-            data: series2Data,
-            color: '#ff4ab0',
-            lineStyle: { width: 2, opacity: 0.9 },
-            sampling: 'lttb',
-            samplingThreshold: 5000,
-          },
-          {
-            type: 'line',
-            name: 'Series 3: Streaming (InterleavedXYData)',
-            data: new Float32Array(0), // Reset streaming data
-            color: '#6bff4a',
-            lineStyle: { width: 2, opacity: 0.9 },
-            sampling: 'none',
-          },
-          {
-            type: 'scatter',
-            name: 'Series 4: Streaming (XYArraysData with size)',
-            data: { x: new Float32Array(0), y: new Float32Array(0), size: new Float32Array(0) }, // Reset streaming data
-            color: 'rgba(255, 160, 74, 0.7)',
-            symbolSize: 4,
-          },
-        ],
-      });
+      // Update series data in currentOptions and apply to chart
+      // Use full currentOptions to preserve all settings (animation, grid, axes, etc.)
+      const updatedSeries = [
+        {
+          type: 'line' as const,
+          name: `Series 1: ${getFormatLabel(series1Format)}`,
+          data: getSeries1Data(),
+          color: '#4a9eff',
+          lineStyle: { width: 2, opacity: 0.9 },
+          sampling: 'lttb' as const,
+          samplingThreshold: 5000,
+        },
+        {
+          type: 'line' as const,
+          name: 'Series 2: InterleavedXYData (with subarray)',
+          data: series2Data,
+          color: '#ff4ab0',
+          lineStyle: { width: 2, opacity: 0.9 },
+          sampling: 'lttb' as const,
+          samplingThreshold: 5000,
+        },
+        {
+          type: 'line' as const,
+          name: 'Series 3: Streaming (InterleavedXYData)',
+          data: new Float32Array(0), // Reset streaming data
+          color: '#6bff4a',
+          lineStyle: { width: 2, opacity: 0.9 },
+          sampling: 'none' as const,
+        },
+        {
+          type: 'scatter' as const,
+          name: 'Series 4: Streaming (XYArraysData with size)',
+          data: { x: new Float32Array(0), y: new Float32Array(0), size: new Float32Array(0) }, // Reset streaming data
+          color: 'rgba(255, 160, 74, 0.7)',
+          symbolSize: 4,
+        },
+      ];
+      
+      // Update currentOptions and apply to chart
+      currentOptions = { ...currentOptions, series: updatedSeries };
+      chart.setOption(currentOptions);
       
       // Reset streaming state after format change
       currentX = X_DOMAIN_MAX;
@@ -404,12 +474,19 @@ async function main() {
   // Start FPS tracking
   trackFPS();
 
+  // Start zoom range tracking (100ms polling)
+  startZoomTracking();
+
   // Cleanup on page unload
   window.addEventListener('beforeunload', () => {
     stopStreaming();
     if (fpsAnimationFrameId !== null) {
       cancelAnimationFrame(fpsAnimationFrameId);
       fpsAnimationFrameId = null;
+    }
+    if (zoomIntervalId !== null) {
+      clearInterval(zoomIntervalId);
+      zoomIntervalId = null;
     }
     ro.disconnect();
     chart.dispose();

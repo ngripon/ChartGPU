@@ -19,7 +19,6 @@ See [ChartGPU.ts](../../src/ChartGPU.ts) for the full interface and lifecycle be
 
 **Methods (essential):**
 
-- `setOption(options: ChartGPUOptions): void`: replaces the current user options, resolves them against defaults via [`resolveOptions`](../../src/config/OptionResolver.ts), updates internal render state, and schedules a single on-demand render on the next `requestAnimationFrame` tick (coalesces multiple calls).
 - `appendData(seriesIndex: number, newPoints: DataPoint[] | XYArraysData | InterleavedXYData | OHLCDataPoint[]): void`: appends new points to a **cartesian** series at runtime (streaming), updates internal runtime bounds, and schedules a render (coalesces).
   
   **Accepted data formats:**

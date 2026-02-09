@@ -281,7 +281,7 @@ type InteractionScalesCache = {
 
 /**
  * Extends bounds with new CartesianSeriesData (any format).
- * Avoids per-point object allocations by using getX/getY accessors.
+ * Optimized to avoid per-point type checks for typed arrays.
  */
 const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSeriesData): Bounds | null => {
   const n = getCartesianPointCount(data);
@@ -289,9 +289,8 @@ const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSer
 
   let b = bounds;
   if (!b) {
-    const seeded = computeRawBoundsFromCartesianData(data);
-    if (!seeded) return bounds;
-    b = seeded;
+    // No existing bounds - compute from scratch (already optimized)
+    return computeRawBoundsFromCartesianData(data);
   }
 
   let xMin = b.xMin;
@@ -299,14 +298,55 @@ const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSer
   let yMin = b.yMin;
   let yMax = b.yMax;
 
-  for (let i = 0; i < n; i++) {
-    const x = getCartesianX(data, i);
-    const y = getCartesianY(data, i);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
+  // Hoist type detection outside loop to avoid per-point type checks
+  const isXYArrays = 
+    typeof data === 'object' &&
+    data !== null &&
+    !Array.isArray(data) &&
+    'x' in data &&
+    'y' in data;
+  
+  const isInterleaved = 
+    typeof data === 'object' &&
+    data !== null &&
+    !Array.isArray(data) &&
+    ArrayBuffer.isView(data);
+
+  if (isXYArrays) {
+    // Fast path for XYArraysData
+    const xyData = data as { x: ArrayLike<number>; y: ArrayLike<number> };
+    for (let i = 0; i < n; i++) {
+      const x = xyData.x[i]!;
+      const y = xyData.y[i]!;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  } else if (isInterleaved) {
+    // Fast path for InterleavedXYData
+    const arr = data as Float32Array | Float64Array;
+    for (let i = 0; i < n; i++) {
+      const x = arr[i * 2]!;
+      const y = arr[i * 2 + 1]!;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  } else {
+    // Array<DataPoint> path: use helper functions
+    for (let i = 0; i < n; i++) {
+      const x = getCartesianX(data, i);
+      const y = getCartesianY(data, i);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
   }
 
   // Keep bounds usable for downstream scale derivation.
@@ -1474,20 +1514,61 @@ export async function createChartGPU(
         const owned = runtimeRawDataByIndex[seriesIndex] as MutableXYColumns;
         const appendData = newPoints as CartesianSeriesData;
 
+        // Hoist type detection outside loops to avoid per-point type checks
+        // Check format once, then use specialized fast paths
+        const isXYArrays = 
+          typeof appendData === 'object' &&
+          appendData !== null &&
+          !Array.isArray(appendData) &&
+          'x' in appendData &&
+          'y' in appendData;
+        
+        const isInterleaved = 
+          typeof appendData === 'object' &&
+          appendData !== null &&
+          !Array.isArray(appendData) &&
+          ArrayBuffer.isView(appendData);
+
         // Track if any appended point has a size value
         let hasAnySizeValue = false;
         const sizesToAppend: (number | undefined)[] = new Array(pointCount);
-        
-        for (let i = 0; i < pointCount; i++) {
-          const size = getCartesianSize(appendData, i);
-          sizesToAppend[i] = size;
-          if (size !== undefined) hasAnySizeValue = true;
-        }
 
-        // Append x, y values directly to columnar arrays (no DataPoint object allocation)
-        for (let i = 0; i < pointCount; i++) {
-          owned.x.push(getCartesianX(appendData, i));
-          owned.y.push(getCartesianY(appendData, i));
+        if (isXYArrays) {
+          // Fast path for XYArraysData: direct array access without type checks
+          const xyData = appendData as { x: ArrayLike<number>; y: ArrayLike<number>; size?: ArrayLike<number> };
+          
+          // Append x, y values
+          for (let i = 0; i < pointCount; i++) {
+            owned.x.push(xyData.x[i]!);
+            owned.y.push(xyData.y[i]!);
+          }
+          
+          // Handle size array if present
+          if (xyData.size) {
+            hasAnySizeValue = true;
+            for (let i = 0; i < pointCount; i++) {
+              sizesToAppend[i] = xyData.size[i];
+            }
+          }
+        } else if (isInterleaved) {
+          // Fast path for InterleavedXYData: direct typed array access
+          const arr = appendData as Float32Array | Float64Array;
+          
+          // Append x, y values from interleaved layout
+          for (let i = 0; i < pointCount; i++) {
+            owned.x.push(arr[i * 2]!);
+            owned.y.push(arr[i * 2 + 1]!);
+          }
+          // InterleavedXYData doesn't support size
+        } else {
+          // Array<DataPoint> path: use helper functions
+          for (let i = 0; i < pointCount; i++) {
+            owned.x.push(getCartesianX(appendData, i));
+            owned.y.push(getCartesianY(appendData, i));
+            const size = getCartesianSize(appendData, i);
+            sizesToAppend[i] = size;
+            if (size !== undefined) hasAnySizeValue = true;
+          }
         }
 
         // Handle size array alignment: ensure size array indices match x/y array indices
