@@ -1,0 +1,19 @@
+# Development
+examples/
+benchmarks/
+docs/
+packages/
+.github/
+.cursor/
+
+# Config files
+tsconfig.json
+vite.config.ts
+.npmrc
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+
+# Assets
+docs/assets/

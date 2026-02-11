@@ -86,5 +86,5 @@ Initial release of ChartGPU - a GPU-accelerated charting library built with WebG
 
 WebGPU is required to run ChartGPU. Ensure your browser supports WebGPU before using this library.
 
-[Unreleased]: https://github.com/hunterg325/ChartGPU/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/hunterg325/ChartGPU/releases/tag/v0.1.0
+[Unreleased]: https://github.com/chartgpu/chartgpu/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/chartgpu/chartgpu/releases/tag/v0.1.0

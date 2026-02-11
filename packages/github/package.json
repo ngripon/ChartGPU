@@ -1,0 +1,22 @@
+{
+  "name": "@chartgpu/chartgpu",
+  "version": "0.2.4",
+  "description": "High-performance WebGPU charting library (GitHub Packages mirror)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chartgpu/chartgpu.git"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}
