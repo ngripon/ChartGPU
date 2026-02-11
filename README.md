@@ -3,7 +3,7 @@
 </p>
 
 <p align="center" style="margin-top:-18px;">
-  The fastest open-source charting library — 50M points at 60 FPS, powered by WebGPU.
+  The fastest open-source charting library — 50M points at 60 FPS.
 </p>
 
 <div align="center">
@@ -92,18 +92,6 @@ See [Annotations Documentation](https://github.com/chartgpu/chartgpu/blob/main/d
 - 🔍 X-axis zoom (inside gestures + optional slider UI)
 - 🎛️ Theme presets (`'dark' | 'light'`) and custom theme support
 
-## Performance
-
-ChartGPU leverages WebGPU to render datasets orders of magnitude larger than traditional Canvas2D or SVG-based charting libraries. The table below shows ChartGPU line-chart FPS at various dataset sizes, measured with the [benchmark harness](examples/benchmark-comparison/) on an Apple M3 Pro / Chrome 131 / 2x DPR at 800x500 canvas.
-
-| Data Points | ChartGPU (WebGPU) | Canvas2D Libraries | SVG Libraries |
-|:-----------:|:------------------:|:------------------:|:-------------:|
-| **100K** | ~60 FPS | ~30-60 FPS | ~5-15 FPS |
-| **1M** | ~60 FPS | ~1-5 FPS | N/A |
-| **10M** | ~60 FPS | N/A | N/A |
-| **35M** | ~72 FPS | N/A | N/A |
-
-> **Note**: Canvas2D and SVG columns show typical ranges for popular libraries (Chart.js, ECharts, D3) based on publicly available benchmarks. "N/A" means the library cannot render that dataset size interactively. Actual results vary by hardware, browser, and library version. Run the [benchmark harness](examples/benchmark-comparison/) to produce numbers for your own environment. See [`docs/benchmarks/comparison.md`](docs/benchmarks/comparison.md) for full methodology.
 
 ### Candlestick Charts
 
