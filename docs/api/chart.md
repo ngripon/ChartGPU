@@ -2,9 +2,132 @@
 
 See [ChartGPU.ts](../../src/ChartGPU.ts) for the chart instance implementation.
 
-## `ChartGPU.create(container: HTMLElement, options: ChartGPUOptions): Promise<ChartGPUInstance>`
+## `ChartGPU.create(container: HTMLElement, options: ChartGPUOptions, context?: ChartGPUCreateContext): Promise<ChartGPUInstance>`
 
 Creates a chart instance bound to a container element.
+
+**Parameters:**
+- `container`: HTMLElement to mount the chart canvas
+- `options`: Chart configuration (series, axes, theme, etc.)
+- `context` (optional): Shared WebGPU context `{ adapter, device }` (share one GPUDevice across multiple charts)
+
+**Returns:** Promise that resolves to a `ChartGPUInstance`
+
+## Shared GPUDevice
+
+ChartGPU supports using a **shared GPUDevice** across multiple chart instances for efficient GPU resource management.
+
+### Use Cases
+
+- **Multi-chart dashboards**: Share one device across 10+ chart instances to reduce GPU memory overhead
+- **WebGPU integration**: Use ChartGPU alongside other WebGPU applications with a centralized device
+- **Resource coordination**: Manage device limits (buffers, textures, pipelines) centrally
+- **Testing and debugging**: Inject mock devices for unit tests or GPU profiling
+
+### Usage
+
+Pass a shared adapter+device via the third parameter (`context`):
+
+```typescript
+import { ChartGPU } from 'chartgpu';
+
+// Create a shared GPUAdapter + GPUDevice once
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+if (!adapter) throw new Error('No WebGPU adapter available');
+const device = await adapter.requestDevice();
+
+// Create multiple charts with the shared device
+const chart1 = await ChartGPU.create(container1, chartOptions1, { adapter, device });
+const chart2 = await ChartGPU.create(container2, chartOptions2, { adapter, device });
+const chart3 = await ChartGPU.create(container3, chartOptions3, { adapter, device });
+```
+
+### Lifecycle and Ownership
+
+**Charts with injected devices do NOT destroy the device on dispose:**
+
+- **Default behavior** (no injected device): `chart.dispose()` unconfigures the canvas and destroys the internal GPUDevice
+- **Injected shared device** (via `context.adapter` + `context.device`): `chart.dispose()` unconfigures the canvas but **does NOT call `device.destroy()`**
+
+**Note:** Canvas unconfiguration (via `canvasContext.unconfigure()`) always happens on dispose, regardless of device ownership. This releases textures obtained from `getCurrentTexture()` and is required for proper WebGPU resource cleanup.
+
+**Note:** ChartGPU currently supports injecting a fully-initialized `{ adapter, device }` pair (shared device mode). Passing only an adapter or only a device is not supported.
+
+**Your responsibility:**
+- Destroy the shared device after all charts are disposed
+- Handle device loss and recreation (see Device Loss Handling below)
+
+```typescript
+// Cleanup example
+await chart1.dispose();
+await chart2.dispose();
+await chart3.dispose();
+
+// Now safe to destroy the shared device
+device.destroy();
+```
+
+### Device Loss Handling
+
+WebGPU devices can be lost due to GPU driver crashes, system sleep, or resource exhaustion. Charts with injected devices emit a **`'deviceLost'`** event when the underlying device is lost.
+
+#### Device Loss Event
+
+```typescript
+chart.on('deviceLost', (info) => {
+  console.error('Device lost:', info.reason, info.message);
+  
+  // Application must handle recovery:
+  // 1. Dispose all charts using the lost device
+  // 2. Create a new shared device
+  // 3. Recreate all charts with the new device
+});
+```
+
+**Event payload:** `{ reason: GPUDeviceLostReason, message: string }`
+- `reason`: `'unknown'` | `'destroyed'` — see [WebGPU spec](https://www.w3.org/TR/webgpu/#device-lost)
+- `message`: Human-readable description from the browser
+
+**Important:**
+- Device loss is **not recoverable** — the device cannot be reused
+- Charts with **non-injected devices** (default behavior) do not emit this event (ChartGPU handles cleanup internally)
+- Applications using shared devices **must** implement recovery logic
+
+#### Recovery Example
+
+```typescript
+const charts = [chart1, chart2, chart3];
+let shared = await createSharedContext();
+
+async function createSharedContext(): Promise<{ adapter: GPUAdapter; device: GPUDevice }> {
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No WebGPU adapter available');
+  const device = await adapter.requestDevice();
+  return { adapter, device };
+}
+
+async function handleDeviceLoss() {
+  // 1. Dispose all charts
+  await Promise.all(charts.map(c => c.dispose()));
+  
+  // 2. Destroy the lost device (if not already destroyed)
+  shared.device.destroy();
+  
+  // 3. Create new device
+  shared = await createSharedContext();
+  
+  // 4. Recreate charts with new device
+  charts[0] = await ChartGPU.create(container1, chartOptions1, shared);
+  charts[1] = await ChartGPU.create(container2, chartOptions2, shared);
+  charts[2] = await ChartGPU.create(container3, chartOptions3, shared);
+  
+  // Re-attach event listeners
+  charts.forEach(chart => chart.on('deviceLost', handleDeviceLoss));
+}
+
+// Attach device loss handlers
+charts.forEach(chart => chart.on('deviceLost', handleDeviceLoss));
+```
 
 ## `ChartGPUInstance`
 

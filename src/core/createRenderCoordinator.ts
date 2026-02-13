@@ -179,10 +179,6 @@ export type RenderCoordinatorCallbacks = Readonly<{
    * interaction state changes (e.g. crosshair on pointer move).
    */
   readonly onRequestRender?: () => void;
-  /**
-   * Called when GPU device is lost.
-   */
-  readonly onDeviceLost?: (reason: string) => void;
 }>;
 
 type Bounds = Readonly<{ xMin: number; xMax: number; yMin: number; yMax: number }>;
@@ -1102,15 +1098,6 @@ export function createRenderCoordinator(
   if (!gpuContext.canvasContext) {
     throw new Error('RenderCoordinator: gpuContext.canvasContext is required.');
   }
-
-  // Listen for device loss and emit callback
-  // Note: We don't call dispose() here to avoid double-cleanup if user calls dispose() in callback.
-  // The coordinator is effectively non-functional after device loss until re-created.
-  device.lost.then((info) => {
-    callbacks?.onDeviceLost?.(info.message || info.reason || 'unknown');
-  }).catch(() => {
-    // Ignore errors in device.lost promise (can occur if device is destroyed before lost promise resolves)
-  });
 
   const targetFormat = gpuContext.preferredFormat ?? DEFAULT_TARGET_FORMAT;
   

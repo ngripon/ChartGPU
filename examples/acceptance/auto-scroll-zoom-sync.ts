@@ -55,6 +55,7 @@ function createMockChart(_name: string): MockChart {
     mouseout: new Set(),
     crosshairMove: new Set(),
     zoomRangeChange: new Set(),
+    deviceLost: new Set(),
   };
   let currentZoomRange = { start: 0, end: 100 };
   let disposed = false;

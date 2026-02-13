@@ -114,9 +114,11 @@ export interface ChartGPUInstance {
   dispose(): void;
   on(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
   on(eventName: 'zoomRangeChange', callback: ChartGPUZoomRangeChangeCallback): void;
+  on(eventName: 'deviceLost', callback: ChartGPUDeviceLostCallback): void;
   on(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   off(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
   off(eventName: 'zoomRangeChange', callback: ChartGPUZoomRangeChangeCallback): void;
+  off(eventName: 'deviceLost', callback: ChartGPUDeviceLostCallback): void;
   off(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   /**
    * Gets the current “interaction x” in domain units (or `null` when inactive).
@@ -189,7 +191,7 @@ export interface ChartGPUInstance {
 // remains the creation API exported from `src/index.ts`).
 export type ChartGPU = ChartGPUInstance;
 
-export type ChartGPUEventName = 'click' | 'mouseover' | 'mouseout' | 'crosshairMove' | 'zoomRangeChange';
+export type ChartGPUEventName = 'click' | 'mouseover' | 'mouseout' | 'crosshairMove' | 'zoomRangeChange' | 'deviceLost';
 
 export type ChartGPUEventPayload = Readonly<{
   readonly seriesIndex: number | null;
@@ -197,6 +199,11 @@ export type ChartGPUEventPayload = Readonly<{
   readonly value: readonly [number, number] | null;
   readonly seriesName: string | null;
   readonly event: PointerEvent;
+}>;
+
+export type ChartGPUDeviceLostPayload = Readonly<{
+  readonly reason: GPUDeviceLostReason;
+  readonly message: string;
 }>;
 
 export type ChartGPUCrosshairMovePayload = Readonly<{
@@ -217,9 +224,20 @@ export type ChartGPUCrosshairMoveCallback = (payload: ChartGPUCrosshairMovePaylo
 
 export type ChartGPUZoomRangeChangeCallback = (payload: ChartGPUZoomRangeChangePayload) => void;
 
-type AnyChartGPUEventCallback = ChartGPUEventCallback | ChartGPUCrosshairMoveCallback | ChartGPUZoomRangeChangeCallback;
+export type ChartGPUDeviceLostCallback = (payload: ChartGPUDeviceLostPayload) => void;
+
+type AnyChartGPUEventCallback = ChartGPUEventCallback | ChartGPUCrosshairMoveCallback | ChartGPUZoomRangeChangeCallback | ChartGPUDeviceLostCallback;
 
 type ListenerRegistry = Readonly<Record<ChartGPUEventName, Set<AnyChartGPUEventCallback>>>;
+
+/**
+ * Context for creating a ChartGPU instance with shared WebGPU device and adapter.
+ * Use this to share a single GPU device across multiple chart instances for improved resource efficiency.
+ */
+export type ChartGPUCreateContext = Readonly<{
+  readonly device: GPUDevice;
+  readonly adapter: GPUAdapter;
+}>;
 
 type TapCandidate = {
   readonly pointerId: number;
@@ -598,24 +616,56 @@ const resolvePieRadiiCss = (
   return { inner: 0, outer: Math.min(maxRadiusCss, outerCss) };
 };
 
+/**
+ * Creates a ChartGPU instance with default WebGPU initialization.
+ */
 export async function createChartGPU(
   container: HTMLElement,
   options: ChartGPUOptions
+): Promise<ChartGPUInstance>;
+
+/**
+ * Creates a ChartGPU instance with a shared WebGPU device and adapter.
+ * Use this overload to share a single GPU device across multiple chart instances.
+ * 
+ * @param container - HTML container element for the chart
+ * @param options - Chart configuration options
+ * @param context - Shared GPU context with device and adapter
+ */
+export async function createChartGPU(
+  container: HTMLElement,
+  options: ChartGPUOptions,
+  context: ChartGPUCreateContext
+): Promise<ChartGPUInstance>;
+
+export async function createChartGPU(
+  container: HTMLElement,
+  options: ChartGPUOptions,
+  context?: ChartGPUCreateContext
 ): Promise<ChartGPUInstance> {
-  // Check WebGPU support before creating canvas or any resources
-  const supportCheck = await checkWebGPUSupport();
-  if (!supportCheck.supported) {
-    const reason = supportCheck.reason || 'Unknown reason';
-    throw new Error(
-      `ChartGPU: WebGPU is not available.\n` +
-      `Reason: ${reason}\n` +
-      `Browser support: Chrome/Edge 113+, Safari 18+, Firefox not yet supported.\n` +
-      `Resources:\n` +
-      `  - MDN WebGPU API: https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API\n` +
-      `  - Browser compatibility: https://caniuse.com/webgpu\n` +
-      `  - WebGPU specification: https://www.w3.org/TR/webgpu/\n` +
-      `  - Check your system: https://webgpureport.org/`
-    );
+  // Check WebGPU support before creating canvas or any resources.
+  // When the caller injects an adapter+device, avoid requesting another adapter during the
+  // support check (shared device mode).
+  if (!context) {
+    const supportCheck = await checkWebGPUSupport();
+    if (!supportCheck.supported) {
+      const reason = supportCheck.reason || 'Unknown reason';
+      throw new Error(
+        `ChartGPU: WebGPU is not available.\n` +
+          `Reason: ${reason}\n` +
+          `Browser support: Chrome/Edge 113+, Safari 18+, Firefox not yet supported.\n` +
+          `Resources:\n` +
+          `  - MDN WebGPU API: https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API\n` +
+          `  - Browser compatibility: https://caniuse.com/webgpu\n` +
+          `  - WebGPU specification: https://www.w3.org/TR/webgpu/\n` +
+          `  - Check your system: https://webgpureport.org/`
+      );
+    }
+  } else {
+    // Minimal sanity checks: the injected device path still requires WebGPU globals for canvas format negotiation.
+    if (typeof navigator === 'undefined' || !navigator.gpu) {
+      throw new Error('ChartGPU: Shared device mode requires WebGPU globals (navigator.gpu) to be available.');
+    }
   }
 
   const canvas = document.createElement('canvas');
@@ -627,6 +677,8 @@ export async function createChartGPU(
 
   // Append before awaiting so it appears immediately and has measurable size.
   container.appendChild(canvas);
+
+  const isSharedDevice = !!context;
 
   let disposed = false;
   let gpuContext: GPUContext | null = null;
@@ -711,6 +763,7 @@ export async function createChartGPU(
     mouseout: new Set<ChartGPUEventCallback>(),
     crosshairMove: new Set<ChartGPUCrosshairMoveCallback>(),
     zoomRangeChange: new Set<ChartGPUZoomRangeChangeCallback>(),
+    deviceLost: new Set<ChartGPUDeviceLostCallback>(),
   };
 
   let tapCandidate: TapCandidate | null = null;
@@ -994,7 +1047,9 @@ export async function createChartGPU(
     pendingZoomSourceArmed = false;
     pendingZoomSource = undefined;
     
-    coordinator = createRenderCoordinator(gpuContext, resolvedOptions, { onRequestRender: requestRender });
+    coordinator = createRenderCoordinator(gpuContext, resolvedOptions, {
+      onRequestRender: requestRender,
+    });
     coordinatorTargetFormat = gpuContext.preferredFormat;
     bindCoordinatorInteractionXChange();
     bindCoordinatorZoomRangeChange();
@@ -1352,7 +1407,7 @@ export async function createChartGPU(
 
   const emit = (
     eventName: ChartGPUEventName,
-    payload: ChartGPUEventPayload | ChartGPUCrosshairMovePayload | ChartGPUZoomRangeChangePayload
+    payload: ChartGPUEventPayload | ChartGPUCrosshairMovePayload | ChartGPUZoomRangeChangePayload | ChartGPUDeviceLostPayload
   ): void => {
     if (disposed) return;
     for (const cb of listeners[eventName]) (cb as (p: typeof payload) => void)(payload);
@@ -1526,6 +1581,7 @@ export async function createChartGPU(
       listeners.mouseout.clear();
       listeners.crosshairMove.clear();
       listeners.zoomRangeChange.clear();
+      listeners.deviceLost.clear();
 
       gpuContext = null;
       canvas.remove();
@@ -1979,7 +2035,11 @@ export async function createChartGPU(
 
     // Try to create GPU context; wrap errors with detailed WebGPU unavailability message
     try {
-      gpuContext = await GPUContext.create(canvas);
+      // Use shared device/adapter if provided in context parameter
+      const gpuContextOptions = context
+        ? { device: context.device, adapter: context.adapter }
+        : undefined;
+      gpuContext = await GPUContext.create(canvas, gpuContextOptions);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -1999,7 +2059,15 @@ export async function createChartGPU(
       if (info.reason !== 'destroyed') {
         console.warn('WebGPU device lost:', info);
       }
-      // Requirement: device loss routes through the same dispose path.
+
+      // AC-6 (CGPU-SHARED-DEVICE): Emit deviceLost event only for shared (injected) devices.
+      // - Shared devices: Application manages device lifecycle; emit event for recovery coordination.
+      // - Owned devices: ChartGPU manages device internally; no event needed (dispose handles cleanup).
+      // Note: 'destroyed' reason indicates intentional destruction, not a loss event.
+      if (isSharedDevice && info.reason !== 'destroyed') {
+        emit('deviceLost', { reason: info.reason, message: info.message });
+      }
+      // Requirement: device loss routes through the same dispose path regardless of ownership.
       dispose();
     });
 
