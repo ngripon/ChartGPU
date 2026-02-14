@@ -195,35 +195,36 @@ disconnect();
 // but does NOT reset zoom (preserves user's zoom level)
 ```
 
-## Shared Device + Sync
+## Shared Device + Pipeline Cache + Sync
 
-The production pattern: combine shared device and chart sync for optimal dashboard performance.
+The production pattern: combine shared device, pipeline cache, and chart sync for optimal dashboard performance.
 
 ```typescript
-import { ChartGPU, connectCharts } from 'chartgpu';
+import { ChartGPU, connectCharts, createPipelineCache } from 'chartgpu';
 
-// 1. Create shared device
+// 1. Create shared device + pipeline cache
 const adapter = await navigator.gpu.requestAdapter({ 
   powerPreference: 'high-performance' 
 });
 if (!adapter) throw new Error('No WebGPU adapter available');
 const device = await adapter.requestDevice();
+const pipelineCache = createPipelineCache(device);
 
-// 2. Create charts with shared device
+// 2. Create charts with shared device + pipeline cache
 const chart1 = await ChartGPU.create(container1, {
   series: [{ type: 'line', data: dataset1 }],
   dataZoom: [{ type: 'inside' }, { type: 'slider' }]
-}, { adapter, device });
+}, { adapter, device, pipelineCache });
 
 const chart2 = await ChartGPU.create(container2, {
   series: [{ type: 'line', data: dataset2 }],
   dataZoom: [{ type: 'inside' }, { type: 'slider' }]
-}, { adapter, device });
+}, { adapter, device, pipelineCache });
 
 const chart3 = await ChartGPU.create(container3, {
   series: [{ type: 'bar', data: dataset3 }],
   dataZoom: [{ type: 'inside' }, { type: 'slider' }]
-}, { adapter, device });
+}, { adapter, device, pipelineCache });
 
 // 3. Connect charts for interaction sync
 const disconnect = connectCharts([chart1, chart2, chart3], {
@@ -268,7 +269,7 @@ console.log(pipelineCache.getStats());
 **Notes:**
 - The cache is **opt-in**. If you omit `pipelineCache`, behavior is unchanged.
 - The cache is scoped to a single `GPUDevice` and validates device mismatches.
-- It dedupes **shader modules + render pipelines**. Compute pipelines (e.g. scatter-density binning/reduction) are not yet cached.
+- It dedupes **shader modules**, **render pipelines**, and **compute pipelines** (including scatter-density binning/reduction) for maximum cross-chart reuse.
 
 ## Device Loss Handling & Recovery
 
@@ -293,23 +294,24 @@ chart.on('deviceLost', (info) => {
 ### Full Recovery Pattern
 
 ```typescript
-import { ChartGPU, connectCharts, type ChartGPUInstance } from 'chartgpu';
+import { ChartGPU, connectCharts, createPipelineCache, type ChartGPUInstance, type PipelineCache } from 'chartgpu';
 
 let charts: ChartGPUInstance[] = [];
-let shared: { adapter: GPUAdapter; device: GPUDevice };
+let shared: { adapter: GPUAdapter; device: GPUDevice; pipelineCache: PipelineCache };
 let disconnect: (() => void) | null = null;
 
-async function createSharedContext(): Promise<{ adapter: GPUAdapter; device: GPUDevice }> {
+async function createSharedContext(): Promise<{ adapter: GPUAdapter; device: GPUDevice; pipelineCache: PipelineCache }> {
   const adapter = await navigator.gpu.requestAdapter({ 
     powerPreference: 'high-performance' 
   });
   if (!adapter) throw new Error('No WebGPU adapter available');
   const device = await adapter.requestDevice();
-  return { adapter, device };
+  const pipelineCache = createPipelineCache(device);
+  return { adapter, device, pipelineCache };
 }
 
 async function initDashboard() {
-  // 1. Create shared device
+  // 1. Create shared device + pipeline cache
   shared = await createSharedContext();
   
   // 2. Create charts
@@ -507,35 +509,40 @@ Proper cleanup prevents memory leaks and resource exhaustion. Follow this order:
 ### Full Cleanup Checklist
 
 ```typescript
-import { ChartGPU, connectCharts, type ChartGPUInstance } from 'chartgpu';
+import { ChartGPU, connectCharts, createPipelineCache, type ChartGPUInstance, type PipelineCache } from 'chartgpu';
 
 class Dashboard {
   private charts: ChartGPUInstance[] = [];
   private device: GPUDevice | null = null;
+  private pipelineCache: PipelineCache | null = null;
   private disconnect: (() => void) | null = null;
   private observers: ResizeObserver[] = [];
   
   async init() {
-    // Create shared device
+    // Create shared device + pipeline cache
     const adapter = await navigator.gpu.requestAdapter({ 
       powerPreference: 'high-performance' 
     });
     if (!adapter) throw new Error('No WebGPU adapter available');
     this.device = await adapter.requestDevice();
+    this.pipelineCache = createPipelineCache(this.device);
     
-    // Create charts
+    // Create charts with shared device + pipeline cache
     this.charts = [
       await ChartGPU.create(container1, options1, { 
         adapter, 
-        device: this.device 
+        device: this.device,
+        pipelineCache: this.pipelineCache
       }),
       await ChartGPU.create(container2, options2, { 
         adapter, 
-        device: this.device 
+        device: this.device,
+        pipelineCache: this.pipelineCache
       }),
       await ChartGPU.create(container3, options3, { 
         adapter, 
-        device: this.device 
+        device: this.device,
+        pipelineCache: this.pipelineCache
       })
     ];
     
@@ -576,6 +583,9 @@ class Dashboard {
       this.device.destroy();
       this.device = null;
     }
+    
+    // 5. Clear pipeline cache reference (auto-clears on device loss)
+    this.pipelineCache = null;
   }
 }
 
@@ -623,6 +633,33 @@ const charts = await Promise.all([
   ChartGPU.create(container4, options4, { adapter, device })
 ]);
 // Total: ~50-100ms + reduced memory overhead
+```
+
+### Use Pipeline Cache for Shader/Pipeline Deduplication
+
+When multiple charts use the same series types (common in monitoring dashboards), share a pipeline cache to avoid redundant GPU shader compilation:
+
+```typescript
+import { ChartGPU, createPipelineCache } from 'chartgpu';
+
+// Create shared device + pipeline cache
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+const device = await adapter!.requestDevice();
+const pipelineCache = createPipelineCache(device);
+
+// All charts reuse compiled shaders and pipelines
+const charts = await Promise.all([
+  ChartGPU.create(container1, options1, { adapter, device, pipelineCache }),
+  ChartGPU.create(container2, options2, { adapter, device, pipelineCache }),
+  ChartGPU.create(container3, options3, { adapter, device, pipelineCache }),
+  ChartGPU.create(container4, options4, { adapter, device, pipelineCache }),
+]);
+
+// Monitor cache effectiveness
+const stats = pipelineCache.getStats();
+console.log(`Shader hits: ${stats.shaderModules.hits}/${stats.shaderModules.total}`);
+console.log(`Render pipeline hits: ${stats.renderPipelines.hits}/${stats.renderPipelines.total}`);
+console.log(`Compute pipeline hits: ${stats.computePipelines.hits}/${stats.computePipelines.total}`);
 ```
 
 ### Use High-Performance Power Preference

@@ -9,6 +9,7 @@ ChartGPU follows a **functional-first architecture**:
 - **Interaction**: Event-driven with render-on-demand scheduling
 - **Render modes**: `'auto'` (internal rAF loop) or `'external'` (application-driven via `renderFrame()`)
 - **Render coordinator**: Modular architecture with 11 specialized modules under `src/core/renderCoordinator/` (see [INTERNALS.md](api/INTERNALS.md))
+- **Pipeline cache**: Optional shared `PipelineCache` for deduplicating shader modules, render pipelines, and compute pipelines across charts on the same device
 
 ## Architecture Diagram
 
@@ -20,6 +21,9 @@ flowchart TB
 
   PublicAPI --> ChartCreate["ChartGPU.create(container, options, context?)"]
   PublicAPI --> SyncAPI["connectCharts(charts)"]
+  PublicAPI --> PipelineCacheCreate["createPipelineCache(device)"]
+  
+  PipelineCacheCreate -. "optional" .-> ChartCreate
 
   subgraph MainThread["Main Thread Rendering - Default"]
     subgraph ChartInstance["Chart instance - src/ChartGPU.ts"]
@@ -71,12 +75,18 @@ flowchart TB
       end
 
       Coordinator --> CoordModules
+      
+      PipelineCacheCreate -. "optional" .-> Coordinator
+      Coordinator -. "forwards pipelineCache" .-> RenderersModule
+      Coordinator -. "forwards pipelineCache" .-> GPU
 
       Coordinator --> Layout["GridArea layout"]
       Coordinator --> Scales["xScale/yScale - clip space for render"]
       Coordinator --> DataUpload["createDataStore(device) - GPU buffer upload/caching"]
       Coordinator --> DensityCompute["Encode + submit compute pass - scatter density mode"]
+      PipelineCacheCreate -. "caches compute pipelines" .-> DensityCompute
       DensityCompute --> RenderPass["Encode + submit render pass"]
+      PipelineCacheCreate -. "caches render pipelines" .-> RenderPass
 
       subgraph InternalOverlays["Internal interaction overlays"]
         Coordinator --> Events["createEventManager(canvas, gridArea)"]
@@ -139,7 +149,7 @@ flowchart TB
 |-----------|----------|----------------|
 | **ChartGPU** | `src/ChartGPU.ts` | Factory + instance lifecycle, canvas management, public events |
 | **GPUContext** | `src/core/GPUContext.ts` | WebGPU adapter/device/context initialization |
-| **PipelineCache (optional)** | `src/core/PipelineCache.ts` | Shared cache for `GPUShaderModule` + `GPURenderPipeline` across charts on the same `GPUDevice` (opt-in via `ChartGPU.create(..., { pipelineCache })`) |
+| **PipelineCache (optional)** | `src/core/PipelineCache.ts` | Shared cache for `GPUShaderModule`, `GPURenderPipeline`, and `GPUComputePipeline` across charts on the same `GPUDevice` (opt-in via `ChartGPU.create(..., { pipelineCache })`) |
 | **Render Coordinator** | `src/core/createRenderCoordinator.ts` | Layout, scales, data upload, render pass orchestration |
 | **Coordinator Modules** | `src/core/renderCoordinator/*` | 11 specialized modules (utils, gpu, renderers, data, zoom, animation, interaction, ui, axis, annotations, render) |
 | **GPU Renderers** | `src/renderers/*` | Series-type-specific WebGPU pipeline renderers |

@@ -233,6 +233,26 @@ export function createRenderPipeline(device: GPUDevice, config: RenderPipelineCo
 }
 
 /**
+ * Creates a compute pipeline, optionally using a pipeline cache for deduplication.
+ *
+ * Unlike render pipelines, compute pipelines typically use explicit layouts (not 'auto'),
+ * so we do NOT force layout: 'auto' when caching.
+ */
+export function createComputePipeline(
+  device: GPUDevice,
+  descriptor: GPUComputePipelineDescriptor,
+  pipelineCache?: PipelineCache
+): GPUComputePipeline {
+  if (pipelineCache && pipelineCache.device !== device) {
+    throw new Error('createComputePipeline(pipelineCache): cache.device must match the provided GPUDevice.');
+  }
+  if (pipelineCache) {
+    return pipelineCache.getOrCreateComputePipeline(descriptor);
+  }
+  return device.createComputePipeline(descriptor);
+}
+
+/**
  * Creates a uniform buffer suitable for `@group/@binding` uniform bindings.
  *
  * Notes:

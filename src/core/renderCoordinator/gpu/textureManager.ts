@@ -11,12 +11,13 @@
  */
 
 import { createRenderPipeline } from '../../../renderers/rendererUtils';
+import type { PipelineCache } from '../../PipelineCache';
 
 /**
  * MSAA sample count for annotation overlay pass.
  * Higher values reduce aliasing but increase memory/performance cost.
  */
-const ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT = 4;
+export const ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT = 4;
 
 /**
  * Blit shader for copying main color texture to MSAA target.
@@ -78,6 +79,7 @@ interface InternalState {
 export interface TextureManagerConfig {
   readonly device: GPUDevice;
   readonly targetFormat: GPUTextureFormat;
+  readonly pipelineCache?: PipelineCache;
 }
 
 /**
@@ -169,7 +171,7 @@ export function createTextureManager(config: TextureManagerConfig): TextureManag
     fragment: { code: OVERLAY_BLIT_WGSL, label: 'textureManager/overlayBlit.wgsl', formats: targetFormat },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     multisample: { count: ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT },
-  });
+  }, config.pipelineCache);
 
   /**
    * Ensures overlay textures are allocated for the given dimensions.
@@ -226,19 +228,31 @@ export function createTextureManager(config: TextureManagerConfig): TextureManag
     state.overlayTargetsWidth = w;
     state.overlayTargetsHeight = h;
     state.overlayTargetsFormat = targetFormat;
+
+    // Invalidate cached getState snapshot after reallocation.
+    cachedState = null;
   }
+
+  // Cached getState snapshot — avoids per-frame object allocation.
+  // Invalidated only when ensureTextures() reallocates resources.
+  let cachedState: TextureManagerState | null = null;
 
   /**
    * Gets current texture manager state for rendering.
+   * Returns a cached object to avoid per-frame allocations.
+   * The cache is invalidated when ensureTextures() reallocates.
    */
   function getState(): TextureManagerState {
-    return {
-      mainColorView: state.mainColorView,
-      overlayMsaaView: state.overlayMsaaView,
-      overlayBlitBindGroup: state.overlayBlitBindGroup,
-      overlayBlitPipeline,
-      msaaSampleCount: ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT,
-    };
+    if (!cachedState) {
+      cachedState = {
+        mainColorView: state.mainColorView,
+        overlayMsaaView: state.overlayMsaaView,
+        overlayBlitBindGroup: state.overlayBlitBindGroup,
+        overlayBlitPipeline,
+        msaaSampleCount: ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT,
+      };
+    }
+    return cachedState;
   }
 
   /**
@@ -257,6 +271,7 @@ export function createTextureManager(config: TextureManagerConfig): TextureManag
     state.overlayTargetsWidth = 0;
     state.overlayTargetsHeight = 0;
     state.overlayTargetsFormat = null;
+    cachedState = null;
   }
 
   return {

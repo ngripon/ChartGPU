@@ -1,6 +1,6 @@
 # Render Coordinator Summary
 
-**⚠️ IMPORTANT FOR LLMs**: Use this summary instead of reading the full `createRenderCoordinator.ts` file (3,799 lines). This document contains only the essential public interfaces and factory function signature needed for understanding the RenderCoordinator API.
+**⚠️ IMPORTANT FOR LLMs**: Use this summary instead of reading the full `createRenderCoordinator.ts` file (3,599 lines). This document contains only the essential public interfaces and factory function signature needed for understanding the RenderCoordinator API.
 
 The render coordinator has been refactored into a modular architecture with 11 specialized modules under `src/core/renderCoordinator/` (see [INTERNALS.md](INTERNALS.md#modular-architecture-refactoring-complete) for details).
 
@@ -88,7 +88,7 @@ export type RenderCoordinatorCallbacks = Readonly<{
    */
   readonly onRequestRender?: () => void;
   /**
-   * Optional shared cache for shader modules + render pipelines (CGPU-PIPELINE-CACHE).
+   * Optional shared cache for shader modules, render pipelines, and compute pipelines (CGPU-PIPELINE-CACHE).
    *
    * Must be bound to the same `GPUDevice` as `gpuContext.device`.
    * If omitted, coordinator and renderers behave identically (no caching).

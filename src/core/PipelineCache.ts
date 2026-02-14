@@ -24,6 +24,12 @@ export type PipelineCacheStats = Readonly<{
     readonly misses: number;
     readonly entries: number;
   }>;
+  readonly computePipelines: Readonly<{
+    readonly total: number;
+    readonly hits: number;
+    readonly misses: number;
+    readonly entries: number;
+  }>;
 }>;
 
 export interface PipelineCache {
@@ -49,6 +55,11 @@ export interface PipelineCache {
    * Render pipeline dedupe keyed by identity-defining fields.
    */
   getOrCreateRenderPipeline(descriptor: GPURenderPipelineDescriptor): GPURenderPipeline;
+
+  /**
+   * Compute pipeline dedupe keyed by identity-defining fields.
+   */
+  getOrCreateComputePipeline(descriptor: GPUComputePipelineDescriptor): GPUComputePipeline;
 }
 
 const FNV1A_64_OFFSET = 0xcbf29ce484222325n;
@@ -261,6 +272,7 @@ const pushDepthStencil = (parts: string[], d: GPUDepthStencilState | undefined):
 export function createPipelineCache(device: GPUDevice): PipelineCache {
   const shaderModuleByWgsl = new Map<string, GPUShaderModule>();
   const renderPipelineByKey = new Map<string, GPURenderPipeline>();
+  const computePipelineByKey = new Map<string, GPUComputePipeline>();
 
   let shaderTotal = 0;
   let shaderHits = 0;
@@ -269,6 +281,10 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
   let pipeTotal = 0;
   let pipeHits = 0;
   let pipeMisses = 0;
+
+  let computeTotal = 0;
+  let computeHits = 0;
+  let computeMisses = 0;
 
   // Weak identity maps for keying.
   let moduleIdByModule = new WeakMap<GPUShaderModule, string>();
@@ -295,6 +311,7 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
   const clear = (): void => {
     shaderModuleByWgsl.clear();
     renderPipelineByKey.clear();
+    computePipelineByKey.clear();
 
     shaderTotal = 0;
     shaderHits = 0;
@@ -303,6 +320,10 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
     pipeTotal = 0;
     pipeHits = 0;
     pipeMisses = 0;
+
+    computeTotal = 0;
+    computeHits = 0;
+    computeMisses = 0;
 
     moduleIdByModule = new WeakMap();
     layoutIdByLayout = new WeakMap();
@@ -400,6 +421,39 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
     return pipeline;
   };
 
+  const getOrCreateComputePipeline = (descriptor: GPUComputePipelineDescriptor): GPUComputePipeline => {
+    computeTotal++;
+
+    const layout = (descriptor.layout ?? 'auto') as GPUPipelineLayout | 'auto';
+    const layoutKey = layout === 'auto' ? 'auto' : getOrAssignLayoutId(layout);
+
+    const compute = descriptor.compute;
+
+    const parts: string[] = [];
+    // Version prefix allows evolving the key format without ambiguity.
+    pushTag(parts, 'cp1');
+
+    pushTag(parts, 'L');
+    pushStr(parts, layoutKey);
+
+    pushTag(parts, 'CS');
+    pushStr(parts, getOrAssignModuleId(compute.module));
+    pushStr(parts, compute.entryPoint ?? '');
+    pushConstants(parts, compute.constants);
+
+    const cacheKey = parts.join('');
+    const cached = computePipelineByKey.get(cacheKey);
+    if (cached) {
+      computeHits++;
+      return cached;
+    }
+
+    computeMisses++;
+    const pipeline = device.createComputePipeline(descriptor);
+    computePipelineByKey.set(cacheKey, pipeline);
+    return pipeline;
+  };
+
   const getStats = (): PipelineCacheStats => ({
     shaderModules: {
       total: shaderTotal,
@@ -413,6 +467,12 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
       misses: pipeMisses,
       entries: renderPipelineByKey.size,
     },
+    computePipelines: {
+      total: computeTotal,
+      hits: computeHits,
+      misses: computeMisses,
+      entries: computePipelineByKey.size,
+    },
   });
 
   return {
@@ -421,5 +481,6 @@ export function createPipelineCache(device: GPUDevice): PipelineCache {
     clear,
     getOrCreateShaderModule,
     getOrCreateRenderPipeline,
+    getOrCreateComputePipeline,
   };
 }

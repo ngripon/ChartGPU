@@ -28,13 +28,13 @@ import { resolvePieRadiiCss } from '../utils/timeAxisUtils';
 import { getPointCount, getX } from '../../../data/cartesianData';
 
 export interface SeriesRenderers {
-  lineRenderers: LineRenderer[];
-  areaRenderers: AreaRenderer[];
-  barRenderer: BarRenderer;
-  scatterRenderers: ScatterRenderer[];
-  scatterDensityRenderers: ScatterDensityRenderer[];
-  pieRenderers: PieRenderer[];
-  candlestickRenderers: CandlestickRenderer[];
+  readonly lineRenderers: ReadonlyArray<LineRenderer>;
+  readonly areaRenderers: ReadonlyArray<AreaRenderer>;
+  readonly barRenderer: BarRenderer;
+  readonly scatterRenderers: ReadonlyArray<ScatterRenderer>;
+  readonly scatterDensityRenderers: ReadonlyArray<ScatterDensityRenderer>;
+  readonly pieRenderers: ReadonlyArray<PieRenderer>;
+  readonly candlestickRenderers: ReadonlyArray<CandlestickRenderer>;
 }
 
 export interface AnnotationRenderers {

@@ -132,12 +132,13 @@ charts.forEach(chart => chart.on('deviceLost', handleDeviceLoss));
 
 ## Pipeline cache (CGPU-PIPELINE-CACHE)
 
-When using a **shared `GPUDevice`** for dashboards, you can also opt into a **shared pipeline cache** to avoid redundant shader compilation and render pipeline creation across charts of the same type.
+When using a **shared `GPUDevice`** for dashboards, you can also opt into a **shared pipeline cache** to avoid redundant shader compilation and pipeline creation across charts of the same type.
 
 ### What is cached
 
 - **`GPUShaderModule`**: deduped by WGSL source string
 - **`GPURenderPipeline`**: deduped by identity-defining pipeline state (shader modules + vertex layouts + targets + depth/stencil + multisample + etc.)
+- **`GPUComputePipeline`**: deduped by compute shader module and pipeline layout (used for scatter-density binning/reduction)
 
 ### Usage
 
@@ -163,7 +164,7 @@ console.log(pipelineCache.getStats());
 - **Device binding**: the cache is scoped to a single `GPUDevice`. Passing a cache created for a different device throws.
 - **Opt-in**: if you omit `pipelineCache`, ChartGPU behaves exactly as before.
 - **Device loss**: the cache clears itself when `device.lost` resolves (stats reset). On recovery, create a new device and a new cache.
-- **Scope**: the cache currently dedupes **shader modules + render pipelines**. Compute pipelines (e.g. scatter-density binning/reduction) are not yet cached.
+- **Scope**: the cache dedupes shader modules, render pipelines, and compute pipelines across all chart types.
 
 ## `ChartGPUInstance`
 

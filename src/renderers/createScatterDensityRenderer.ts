@@ -4,7 +4,7 @@ import type { RawBounds, ResolvedScatterSeriesConfig } from '../config/OptionRes
 import type { LinearScale } from '../utils/scales';
 import { parseCssColorToRgba01 } from '../utils/colors';
 import type { GridArea } from './createGridRenderer';
-import { createRenderPipeline, createShaderModule, createUniformBuffer, writeUniformBuffer } from './rendererUtils';
+import { createRenderPipeline, createShaderModule, createUniformBuffer, writeUniformBuffer, createComputePipeline } from './rendererUtils';
 import type { PipelineCache } from '../core/PipelineCache';
 
 export interface ScatterDensityRenderer {
@@ -165,6 +165,10 @@ const normalizationToU32 = (n: ResolvedScatterSeriesConfig['densityNormalization
   return 0;
 };
 
+// Pre-allocated zero buffer for clearing the max reduction buffer.
+// Avoids `new Uint32Array([0]).buffer` allocation per compute dispatch.
+const ZERO_U32_BUFFER: ArrayBuffer = new Uint32Array([0]).buffer;
+
 export function createScatterDensityRenderer(
   device: GPUDevice,
   options?: ScatterDensityRendererOptions
@@ -212,16 +216,17 @@ export function createScatterDensityRenderer(
     'scatterDensityBinning.wgsl',
     pipelineCache
   );
-  const binPointsPipeline = device.createComputePipeline({
+  const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [computeBindGroupLayout] });
+  const binPointsPipeline = createComputePipeline(device, {
     label: 'scatterDensity/binPointsPipeline',
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBindGroupLayout] }),
+    layout: computeLayout,
     compute: { module: binningModule, entryPoint: 'binPoints' },
-  });
-  const reduceMaxPipeline = device.createComputePipeline({
+  }, pipelineCache);
+  const reduceMaxPipeline = createComputePipeline(device, {
     label: 'scatterDensity/reduceMaxPipeline',
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBindGroupLayout] }),
+    layout: computeLayout,
     compute: { module: binningModule, entryPoint: 'reduceMax' },
-  });
+  }, pipelineCache);
 
   const renderPipeline = createRenderPipeline(
     device,
@@ -498,7 +503,7 @@ export function createScatterDensityRenderer(
 
     // Clear bins + max.
     device.queue.writeBuffer(binsBuffer, 0, zeroBinsStaging.buffer, 0, binsCapacityU32 * 4);
-    device.queue.writeBuffer(maxBuffer, 0, new Uint32Array([0]).buffer);
+    device.queue.writeBuffer(maxBuffer, 0, ZERO_U32_BUFFER);
 
     const binTotal = (lastBinCountX * lastBinCountY) | 0;
     const visibleCount = Math.max(0, (lastVisibleEnd - lastVisibleStart) | 0);

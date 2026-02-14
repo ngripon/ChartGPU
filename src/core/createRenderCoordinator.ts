@@ -43,16 +43,10 @@ import {
 import { createAxisRenderer } from '../renderers/createAxisRenderer';
 import { createGridRenderer } from '../renderers/createGridRenderer';
 import type { GridArea } from '../renderers/createGridRenderer';
-import { createAreaRenderer } from '../renderers/createAreaRenderer';
-import { createLineRenderer } from '../renderers/createLineRenderer';
-import { createBarRenderer } from '../renderers/createBarRenderer';
-import { createScatterRenderer } from '../renderers/createScatterRenderer';
-import { createScatterDensityRenderer } from '../renderers/createScatterDensityRenderer';
-import { createPieRenderer } from '../renderers/createPieRenderer';
-import { createCandlestickRenderer } from '../renderers/createCandlestickRenderer';
+import { createRendererPool } from './renderCoordinator/renderers/rendererPool';
+import { createTextureManager, ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT } from './renderCoordinator/gpu/textureManager';
 import { createCrosshairRenderer } from '../renderers/createCrosshairRenderer';
 import { createHighlightRenderer } from '../renderers/createHighlightRenderer';
-import { createRenderPipeline } from '../renderers/rendererUtils';
 import { createReferenceLineRenderer } from '../renderers/createReferenceLineRenderer';
 import type { ReferenceLineInstance } from '../renderers/createReferenceLineRenderer';
 import { createAnnotationMarkerRenderer } from '../renderers/createAnnotationMarkerRenderer';
@@ -1486,8 +1480,6 @@ export function createRenderCoordinator(
   // To keep MSAA scoped, we render the main scene to a single-sample texture, then:
   // - MSAA overlay pass: blit main scene into an MSAA target + draw above-series annotations, resolve to swapchain
   // - Top overlay pass: draw crosshair/axes/highlight (single-sample) on top of the resolved swapchain
-  const ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT = 4;
-
   const referenceLineRenderer = createReferenceLineRenderer(device, { targetFormat, pipelineCache });
   const annotationMarkerRenderer = createAnnotationMarkerRenderer(device, { targetFormat, pipelineCache });
   const referenceLineRendererMsaa = createReferenceLineRenderer(device, {
@@ -1501,105 +1493,7 @@ export function createRenderCoordinator(
     pipelineCache,
   });
 
-  let mainColorTexture: GPUTexture | null = null;
-  let mainColorView: GPUTextureView | null = null;
-  let overlayMsaaTexture: GPUTexture | null = null;
-  let overlayMsaaView: GPUTextureView | null = null;
-  let overlayTargetsWidth = 0;
-  let overlayTargetsHeight = 0;
-  let overlayTargetsFormat: GPUTextureFormat | null = null;
-
-  const OVERLAY_BLIT_WGSL = `
-struct VSOut { @builtin(position) pos: vec4f };
-
-@vertex
-fn vsMain(@builtin(vertex_index) i: u32) -> VSOut {
-  var positions = array<vec2f, 3>(
-    vec2f(-1.0, -1.0),
-    vec2f( 3.0, -1.0),
-    vec2f(-1.0,  3.0)
-  );
-  var o: VSOut;
-  o.pos = vec4f(positions[i], 0.0, 1.0);
-  return o;
-}
-
-// Using textureLoad (no filtering) for pixel-exact blit into the MSAA overlay pass.
-@group(0) @binding(0) var srcTex: texture_2d<f32>;
-
-@fragment
-fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let xy = vec2<i32>(pos.xy);
-  return textureLoad(srcTex, xy, 0);
-}
-`;
-
-  const overlayBlitBindGroupLayout = device.createBindGroupLayout({
-    entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } }],
-  });
-
-  const overlayBlitPipeline = createRenderPipeline(
-    device,
-    {
-      label: 'renderCoordinator/overlayBlitPipeline',
-      bindGroupLayouts: [overlayBlitBindGroupLayout],
-      vertex: { code: OVERLAY_BLIT_WGSL, label: 'renderCoordinator/overlayBlit.wgsl' },
-      fragment: { code: OVERLAY_BLIT_WGSL, label: 'renderCoordinator/overlayBlit.wgsl', formats: targetFormat },
-      primitive: { topology: 'triangle-list', cullMode: 'none' },
-      multisample: { count: ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT },
-    },
-    pipelineCache
-  );
-
-  let overlayBlitBindGroup: GPUBindGroup | null = null;
-
-  const destroyTexture = (tex: GPUTexture | null): void => {
-    if (!tex) return;
-    try {
-      tex.destroy();
-    } catch {
-      // best-effort
-    }
-  };
-
-  const ensureOverlayTargets = (canvasWidthDevicePx: number, canvasHeightDevicePx: number): void => {
-    const w = Number.isFinite(canvasWidthDevicePx) ? Math.max(1, Math.floor(canvasWidthDevicePx)) : 1;
-    const h = Number.isFinite(canvasHeightDevicePx) ? Math.max(1, Math.floor(canvasHeightDevicePx)) : 1;
-
-    if (mainColorTexture && overlayMsaaTexture && overlayBlitBindGroup && overlayTargetsWidth === w && overlayTargetsHeight === h && overlayTargetsFormat === targetFormat) {
-      return;
-    }
-
-    destroyTexture(mainColorTexture);
-    destroyTexture(overlayMsaaTexture);
-
-    mainColorTexture = device.createTexture({
-      label: 'renderCoordinator/mainColorTexture',
-      size: { width: w, height: h },
-      format: targetFormat,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
-    mainColorView = mainColorTexture.createView();
-
-    overlayMsaaTexture = device.createTexture({
-      label: 'renderCoordinator/annotationOverlayMsaaTexture',
-      size: { width: w, height: h },
-      sampleCount: ANNOTATION_OVERLAY_MSAA_SAMPLE_COUNT,
-      format: targetFormat,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    overlayMsaaView = overlayMsaaTexture.createView();
-
-    overlayBlitBindGroup = device.createBindGroup({
-      label: 'renderCoordinator/overlayBlitBindGroup',
-      layout: overlayBlitBindGroupLayout,
-      entries: [{ binding: 0, resource: mainColorView }],
-    });
-
-    overlayTargetsWidth = w;
-    overlayTargetsHeight = h;
-    overlayTargetsFormat = targetFormat;
-  };
+  const textureManager = createTextureManager({ device, targetFormat, pipelineCache });
 
   const initialGridArea = computeGridArea(gpuContext, currentOptions);
   
@@ -2569,80 +2463,14 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   recomputeRenderSeries();
   lastSampledData = new Array(currentOptions.series.length).fill(null);
 
-  const areaRenderers: Array<ReturnType<typeof createAreaRenderer>> = [];
-  const lineRenderers: Array<ReturnType<typeof createLineRenderer>> = [];
-  const scatterRenderers: Array<ReturnType<typeof createScatterRenderer>> = [];
-  const scatterDensityRenderers: Array<ReturnType<typeof createScatterDensityRenderer>> = [];
-  const pieRenderers: Array<ReturnType<typeof createPieRenderer>> = [];
-  const candlestickRenderers: Array<ReturnType<typeof createCandlestickRenderer>> = [];
-  const barRenderer = createBarRenderer(device, { targetFormat, pipelineCache });
+  const rendererPool = createRendererPool({ device, targetFormat, pipelineCache });
 
-  const ensureAreaRendererCount = (count: number): void => {
-    while (areaRenderers.length > count) {
-      const r = areaRenderers.pop();
-      r?.dispose();
-    }
-    while (areaRenderers.length < count) {
-      areaRenderers.push(createAreaRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  const ensureLineRendererCount = (count: number): void => {
-    while (lineRenderers.length > count) {
-      const r = lineRenderers.pop();
-      r?.dispose();
-    }
-    while (lineRenderers.length < count) {
-      lineRenderers.push(createLineRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  const ensureScatterRendererCount = (count: number): void => {
-    while (scatterRenderers.length > count) {
-      const r = scatterRenderers.pop();
-      r?.dispose();
-    }
-    while (scatterRenderers.length < count) {
-      scatterRenderers.push(createScatterRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  const ensureScatterDensityRendererCount = (count: number): void => {
-    while (scatterDensityRenderers.length > count) {
-      const r = scatterDensityRenderers.pop();
-      r?.dispose();
-    }
-    while (scatterDensityRenderers.length < count) {
-      scatterDensityRenderers.push(createScatterDensityRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  const ensurePieRendererCount = (count: number): void => {
-    while (pieRenderers.length > count) {
-      const r = pieRenderers.pop();
-      r?.dispose();
-    }
-    while (pieRenderers.length < count) {
-      pieRenderers.push(createPieRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  const ensureCandlestickRendererCount = (count: number): void => {
-    while (candlestickRenderers.length > count) {
-      const r = candlestickRenderers.pop();
-      r?.dispose();
-    }
-    while (candlestickRenderers.length < count) {
-      candlestickRenderers.push(createCandlestickRenderer(device, { targetFormat, pipelineCache }));
-    }
-  };
-
-  ensureAreaRendererCount(currentOptions.series.length);
-  ensureLineRendererCount(currentOptions.series.length);
-  ensureScatterRendererCount(currentOptions.series.length);
-  ensureScatterDensityRendererCount(currentOptions.series.length);
-  ensurePieRendererCount(currentOptions.series.length);
-  ensureCandlestickRendererCount(currentOptions.series.length);
+  rendererPool.ensureAreaRendererCount(currentOptions.series.length);
+  rendererPool.ensureLineRendererCount(currentOptions.series.length);
+  rendererPool.ensureScatterRendererCount(currentOptions.series.length);
+  rendererPool.ensureScatterDensityRendererCount(currentOptions.series.length);
+  rendererPool.ensurePieRendererCount(currentOptions.series.length);
+  rendererPool.ensureCandlestickRendererCount(currentOptions.series.length);
 
   const assertNotDisposed = (): void => {
     if (disposed) throw new Error('RenderCoordinator is disposed.');
@@ -2757,12 +2585,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         }
 
     const nextCount = resolvedOptions.series.length;
-    ensureAreaRendererCount(nextCount);
-    ensureLineRendererCount(nextCount);
-    ensureScatterRendererCount(nextCount);
-    ensureScatterDensityRendererCount(nextCount);
-    ensurePieRendererCount(nextCount);
-    ensureCandlestickRendererCount(nextCount);
+    rendererPool.ensureAreaRendererCount(nextCount);
+    rendererPool.ensureLineRendererCount(nextCount);
+    rendererPool.ensureScatterRendererCount(nextCount);
+    rendererPool.ensureScatterDensityRendererCount(nextCount);
+    rendererPool.ensurePieRendererCount(nextCount);
+    rendererPool.ensureCandlestickRendererCount(nextCount);
 
     // When the series count shrinks, explicitly destroy per-index GPU buffers for removed series.
     // This avoids recreating the entire DataStore and keeps existing buffers for retained indices.
@@ -3435,17 +3263,12 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         ? 0.5 * Math.min(plotSize.plotWidthCss, plotSize.plotHeightCss)
         : 0;
 
+    // Cache renderer pool state once per frame to avoid repeated object allocations.
+    const poolState = rendererPool.getState();
+
     // Prepare all series renderers (area, line, bar, scatter, pie, candlestick)
     const seriesPreparation = prepareSeries(
-      {
-        lineRenderers,
-        areaRenderers,
-        barRenderer,
-        scatterRenderers,
-        scatterDensityRenderers,
-        pieRenderers,
-        candlestickRenderers,
-      },
+      poolState,
       {
         currentOptions,
         seriesForRender,
@@ -3469,7 +3292,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Prepare bar renderer with animated scale if intro is running
     const introP = introPhase === 'running' ? clamp01(introProgress01) : 1;
     const yScaleForBars = introP < 1 ? createAnimatedBarYScale(yScale, plotClipRect, visibleBarSeriesConfigs, introP) : yScale;
-    barRenderer.prepare(visibleBarSeriesConfigs, dataStore, xScale, yScaleForBars, gridArea);
+    poolState.barRenderer.prepare(visibleBarSeriesConfigs, dataStore, xScale, yScaleForBars, gridArea);
 
     // Prepare annotation GPU overlays (reference lines + point markers).
     // Note: these renderers expect CANVAS-LOCAL CSS pixel coordinates; the coordinator owns
@@ -3507,7 +3330,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       });
     }
 
-    ensureOverlayTargets(gridArea.canvasWidth, gridArea.canvasHeight);
+    textureManager.ensureTextures(gridArea.canvasWidth, gridArea.canvasHeight);
+    const texState = textureManager.getState();
 
     // Swapchain view for the resolved MSAA overlay pass and for the final (load) overlay pass.
     const swapchainView = gpuContext.canvasContext.getCurrentTexture().createView();
@@ -3516,7 +3340,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
     // Encode compute passes (scatter density) before the render pass.
     encodeScatterDensityCompute(
-      { lineRenderers, areaRenderers, barRenderer, scatterRenderers, scatterDensityRenderers, pieRenderers, candlestickRenderers },
+      poolState,
       seriesForRender,
       encoder
     );
@@ -3525,7 +3349,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       label: 'renderCoordinator/mainPass',
       colorAttachments: [
         {
-          view: mainColorView!,
+          view: texState.mainColorView!,
           clearValue,
           loadOp: 'clear',
           storeOp: 'store',
@@ -3548,7 +3372,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
     // Render all series to the main pass with proper layering
     renderSeriesPass(
-      { lineRenderers, areaRenderers, barRenderer, scatterRenderers, scatterDensityRenderers, pieRenderers, candlestickRenderers },
+      poolState,
       { referenceLineRenderer, referenceLineRendererMsaa, annotationMarkerRenderer, annotationMarkerRendererMsaa },
       {
         hasCartesianSeries,
@@ -3570,7 +3394,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       label: 'renderCoordinator/annotationOverlayMsaaPass',
       colorAttachments: [
         {
-          view: overlayMsaaView!,
+          view: texState.overlayMsaaView!,
           resolveTarget: swapchainView,
           clearValue,
           loadOp: 'clear',
@@ -3579,8 +3403,8 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       ],
     });
 
-    overlayPass.setPipeline(overlayBlitPipeline);
-    overlayPass.setBindGroup(0, overlayBlitBindGroup!);
+    overlayPass.setPipeline(texState.overlayBlitPipeline);
+    overlayPass.setBindGroup(0, texState.overlayBlitBindGroup!);
     overlayPass.draw(3);
 
     // Render above-series annotations to the overlay pass
@@ -3695,32 +3519,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     crosshairRenderer.dispose();
     highlightRenderer.dispose();
 
-    for (let i = 0; i < areaRenderers.length; i++) {
-      areaRenderers[i].dispose();
-    }
-    areaRenderers.length = 0;
-
-    for (let i = 0; i < lineRenderers.length; i++) {
-      lineRenderers[i].dispose();
-    }
-    lineRenderers.length = 0;
-
-    for (let i = 0; i < scatterRenderers.length; i++) {
-      scatterRenderers[i].dispose();
-    }
-    scatterRenderers.length = 0;
-
-    for (let i = 0; i < pieRenderers.length; i++) {
-      pieRenderers[i].dispose();
-    }
-    pieRenderers.length = 0;
-
-    for (let i = 0; i < candlestickRenderers.length; i++) {
-      candlestickRenderers[i].dispose();
-    }
-    candlestickRenderers.length = 0;
-
-    barRenderer.dispose();
+    rendererPool.dispose();
 
     gridRenderer.dispose();
     xAxisRenderer.dispose();
@@ -3730,13 +3529,7 @@ fn fsMain(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     referenceLineRendererMsaa.dispose();
     annotationMarkerRendererMsaa.dispose();
 
-    destroyTexture(mainColorTexture);
-    destroyTexture(overlayMsaaTexture);
-    mainColorTexture = null;
-    mainColorView = null;
-    overlayMsaaTexture = null;
-    overlayMsaaView = null;
-    overlayBlitBindGroup = null;
+    textureManager.dispose();
 
     dataStore.dispose();
 

@@ -142,6 +142,7 @@ function createMockDevice(opts?: { readonly lost?: Promise<GPUDeviceLostInfo> })
   // Use separate ID counters for different resource types to accurately simulate WebGPU object identity.
   let nextShaderModuleId = 1;
   let nextRenderPipelineId = 1;
+  let nextComputePipelineId = 1;
   return {
     limits: {
       maxTextureDimension2D: 8192,
@@ -161,7 +162,7 @@ function createMockDevice(opts?: { readonly lost?: Promise<GPUDeviceLostInfo> })
     createBindGroup: vi.fn(() => ({})),
     createBindGroupLayout: vi.fn(() => ({})),
     createPipelineLayout: vi.fn(() => ({})),
-    createComputePipeline: vi.fn(() => ({})),
+    createComputePipeline: vi.fn(() => ({ __kind: 'computePipeline', __id: nextComputePipelineId++ })),
     createCommandEncoder: vi.fn(() => ({
       beginRenderPass: vi.fn(() => ({ end: vi.fn() })),
       finish: vi.fn(() => ({})),
@@ -319,6 +320,7 @@ describe('CGPU-PIPELINE-CACHE', () => {
     expect(cache.getStats()).toEqual({
       shaderModules: { total: 0, hits: 0, misses: 0, entries: 0 },
       renderPipelines: { total: 0, hits: 0, misses: 0, entries: 0 },
+      computePipelines: { total: 0, hits: 0, misses: 0, entries: 0 },
     });
 
     // After loss, cache is empty: next request is a miss.
@@ -396,5 +398,107 @@ describe('CGPU-PIPELINE-CACHE', () => {
     // No pipelines created yet
     expect(stats.renderPipelines.entries).toBe(0);
     expect(stats.renderPipelines.total).toBe(0);
+  });
+
+  it('dedupes compute pipelines by equivalent descriptor (strict equality)', () => {
+    const device = createMockDevice();
+    const cache = createPipelineCache(device);
+
+    const wgsl = '@compute @workgroup_size(64) fn main() {}';
+    const module = cache.getOrCreateShaderModule(wgsl);
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [] });
+
+    const desc: GPUComputePipelineDescriptor = {
+      layout,
+      compute: { module, entryPoint: 'main' },
+    };
+
+    const p1 = cache.getOrCreateComputePipeline(desc);
+    const p2 = cache.getOrCreateComputePipeline(desc);
+
+    expect(p1).toBe(p2);
+
+    const stats = cache.getStats();
+    expect(stats.computePipelines.total).toBe(2);
+    expect(stats.computePipelines.misses).toBe(1);
+    expect(stats.computePipelines.hits).toBe(1);
+    expect(stats.computePipelines.entries).toBe(1);
+  });
+
+  it('compute pipeline: different entry points => separate cache entries', () => {
+    const device = createMockDevice();
+    const cache = createPipelineCache(device);
+
+    const wgsl = '@compute @workgroup_size(64) fn binPoints() {} fn reduceMax() {}';
+    const module = cache.getOrCreateShaderModule(wgsl);
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [] });
+
+    const p1 = cache.getOrCreateComputePipeline({
+      layout,
+      compute: { module, entryPoint: 'binPoints' },
+    });
+    const p2 = cache.getOrCreateComputePipeline({
+      layout,
+      compute: { module, entryPoint: 'reduceMax' },
+    });
+
+    expect(p1).not.toBe(p2);
+
+    const stats = cache.getStats();
+    expect(stats.computePipelines.total).toBe(2);
+    expect(stats.computePipelines.misses).toBe(2);
+    expect(stats.computePipelines.hits).toBe(0);
+    expect(stats.computePipelines.entries).toBe(2);
+  });
+
+  it('device loss clears compute pipeline cache', async () => {
+    const lost = createDeferred<GPUDeviceLostInfo>();
+    const device = createMockDevice({ lost: lost.promise });
+    const cache = createPipelineCache(device);
+
+    const wgsl = '@compute @workgroup_size(64) fn main() {}';
+    const module = cache.getOrCreateShaderModule(wgsl);
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [] });
+
+    cache.getOrCreateComputePipeline({
+      layout,
+      compute: { module, entryPoint: 'main' },
+    }); // miss
+
+    expect(cache.getStats().computePipelines.total).toBe(1);
+    expect(cache.getStats().computePipelines.misses).toBe(1);
+    expect(cache.getStats().computePipelines.entries).toBe(1);
+
+    lost.resolve({ reason: 'unknown' as GPUDeviceLostReason, message: 'simulated' } as any);
+    await lost.promise;
+    // Allow the `.then(...)` handler in the cache to run.
+    await Promise.resolve();
+
+    expect(cache.getStats().computePipelines).toEqual({
+      total: 0,
+      hits: 0,
+      misses: 0,
+      entries: 0,
+    });
+  });
+
+  it('stats include computePipelines in getStats()', () => {
+    const device = createMockDevice();
+    const cache = createPipelineCache(device);
+
+    const stats = cache.getStats();
+
+    // Verify the computePipelines stats object exists with the correct shape.
+    expect(stats).toHaveProperty('computePipelines');
+    expect(stats.computePipelines).toEqual({
+      total: 0,
+      hits: 0,
+      misses: 0,
+      entries: 0,
+    });
+
+    // Also verify other stats sections are still present.
+    expect(stats).toHaveProperty('shaderModules');
+    expect(stats).toHaveProperty('renderPipelines');
   });
 });

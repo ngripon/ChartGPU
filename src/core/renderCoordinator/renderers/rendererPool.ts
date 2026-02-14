@@ -226,20 +226,30 @@ export function createRendererPool(config: RendererPoolConfig): RendererPool {
     }
   }
 
+  // Cached state object to avoid per-frame allocations.
+  // Since the arrays are mutated in-place (push/pop), the cached object's
+  // readonly references remain valid — we only need one allocation.
+  let cachedState: RendererPoolState | null = null;
+
   /**
    * Gets current renderer pool state.
-   * Returns readonly arrays to prevent external mutation.
+   * Returns a cached object with readonly array references to prevent
+   * per-frame object allocations. The object is created once and reused
+   * because the underlying arrays are mutated in-place.
    */
   function getState(): RendererPoolState {
-    return {
-      areaRenderers,
-      lineRenderers,
-      scatterRenderers,
-      scatterDensityRenderers,
-      pieRenderers,
-      candlestickRenderers,
-      barRenderer,
-    };
+    if (!cachedState) {
+      cachedState = {
+        areaRenderers,
+        lineRenderers,
+        scatterRenderers,
+        scatterDensityRenderers,
+        pieRenderers,
+        candlestickRenderers,
+        barRenderer,
+      };
+    }
+    return cachedState;
   }
 
   /**

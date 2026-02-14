@@ -18,7 +18,7 @@ This is a guide for AI assistants working with ChartGPU. Use this document to qu
 - **PointerEventData**: Pre-computed pointer event data for programmatic event forwarding - [src/config/types.ts](../../src/config/types.ts)
 - **TooltipData, LegendItem, AxisLabel**: DOM overlay data types - [src/config/types.ts](../../src/config/types.ts)
 - **PerformanceMetrics, PerformanceCapabilities**: Performance monitoring types - [options.md](options.md#performance-metrics-types)
-- **PipelineCache, PipelineCacheStats**: Shared cache types for shader module + render pipeline dedupe - [chart.md](chart.md#pipeline-cache-cgpu-pipeline-cache)
+- **PipelineCache, PipelineCacheStats**: Shared cache types for shader module, render pipeline, and compute pipeline dedupe - [chart.md](chart.md#pipeline-cache-cgpu-pipeline-cache)
 
 ### Configuration
 - **Options overview**: [options.md](options.md#chartgpuoptions)

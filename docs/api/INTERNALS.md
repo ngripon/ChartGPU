@@ -198,7 +198,7 @@ A standalone internal DOM helper for rendering a slider-style x-zoom UI. See [`c
 
 ## Render coordinator (internal / contributor notes)
 
-A modular orchestration layer for "resolved options → render pass submission". Originally a monolithic 4,806-line file, the render coordinator has been refactored into a maintainable modular architecture (3,799 lines in main file, with 11 specialized modules totaling ~3,300 lines).
+A modular orchestration layer for "resolved options → render pass submission". Originally a monolithic 4,806-line file, the render coordinator has been refactored into a maintainable modular architecture (3,599 lines in main file, with 11 specialized modules totaling ~3,300 lines).
 
 See [render-coordinator-summary.md](render-coordinator-summary.md) for the essential public interfaces (`GPUContextLike`, `RenderCoordinator`, `RenderCoordinatorCallbacks`) and factory function signature. For complete implementation details, see [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
 
@@ -245,10 +245,10 @@ The render coordinator has been systematically refactored into a modular archite
    - `timeAxisUtils.ts` (342 lines) - Time formatting and adaptive tick generation
 
 2. **`gpu/`** - GPU resource management
-   - `textureManager.ts` (256 lines) - Lazy texture allocation, MSAA overlay management, blit pipeline for multi-pass rendering (**note**: module exists but is not currently wired into `createRenderCoordinator.ts`)
+   - `textureManager.ts` (256 lines) - Lazy texture allocation, MSAA overlay management, blit pipeline for multi-pass rendering
 
 3. **`renderers/`** - Renderer lifecycle
-   - `rendererPool.ts` (303 lines) - Dynamic renderer array sizing, lazy instantiation, per-chart-type pools (**note**: module exists but is not currently wired into `createRenderCoordinator.ts`)
+   - `rendererPool.ts` (303 lines) - Dynamic renderer array sizing, lazy instantiation, per-chart-type pools
 
 4. **`data/`** - Data transformation pipeline
    - `computeVisibleSlice.ts` (365 lines) - Visible range slicing with binary search optimization and WeakMap caching
@@ -278,7 +278,7 @@ The render coordinator has been systematically refactored into a modular archite
     - `renderOverlays.ts` (204 lines) - Overlay preparation (grid, axes, crosshair, highlight)
     - `renderSeries.ts` (469 lines) - All series rendering (area, line, bar, scatter, pie, candlestick)
 
-**Total reduction:** 1,007 lines extracted from main file (4,806 → 3,799 lines, 20.9% reduction)
+**Total reduction:** 1,207 lines extracted from main file (4,806 → 3,599 lines, 25.1% reduction)
 
 **Module patterns:**
 
@@ -297,8 +297,8 @@ The `render()` method orchestrates the following phases using the modular archit
 3. **Scale creation** (`axisUtils`) - Build clip-space scales for rendering
 4. **Data transformation** (`computeVisibleSlice`) - Slice visible data range with binary search
 5. **Animation** (`animationHelpers`) - Interpolate data during animations
-6. **Texture management** (current: inline in `createRenderCoordinator.ts`; `textureManager.ts` exists but is not currently wired) - Allocate/reallocate GPU textures as needed
-7. **Renderer lifecycle** (current: inline in `createRenderCoordinator.ts`; `rendererPool.ts` exists but is not currently wired) - Ensure renderer arrays match series counts
+6. **Texture management** (`textureManager`) - Allocate/reallocate GPU textures as needed
+7. **Renderer lifecycle** (`rendererPool`) - Ensure renderer arrays match series counts
 8. **Series rendering** (`renderSeries`) - Render all chart types (area, line, bar, scatter, pie, candlestick)
 9. **Overlay rendering** (`renderOverlays`) - Render grid, axes, crosshair, highlight
 10. **Annotation processing** (`processAnnotations`) - Process annotations for GPU rendering
@@ -314,10 +314,9 @@ The `render()` method orchestrates the following phases using the modular archit
 ### Pipeline cache wiring notes (CGPU-PIPELINE-CACHE)
 
 - `createRenderCoordinator(...)` receives `callbacks?.pipelineCache` and forwards it into renderer factories.
-- Renderers create shader modules and render pipelines via `src/renderers/rendererUtils.ts`, which consults `PipelineCache` when provided.
-- Known gaps / drift points:
-  - Scatter-density uses **compute pipelines** (`device.createComputePipeline(...)`) that are not currently cached.
-  - `src/core/renderCoordinator/gpu/textureManager.ts` and `src/core/renderCoordinator/renderers/rendererPool.ts` are not currently wired into `createRenderCoordinator.ts`. If/when they are wired, they should accept `pipelineCache` and pass it through to `rendererUtils.createRenderPipeline(...)`.
+- Renderers create shader modules, render pipelines, and compute pipelines via `src/renderers/rendererUtils.ts`, which consults `PipelineCache` when provided.
+- **All pipeline types are now cached**: shader modules, render pipelines, and compute pipelines (including scatter-density binning/reduction).
+- `textureManager.ts` and `rendererPool.ts` are now wired into `createRenderCoordinator.ts`. Both modules accept `pipelineCache` and forward it to their internal pipeline creation paths.
 
 ## DOM Overlay Separation (No-DOM mode)
 
@@ -341,6 +340,7 @@ Shared WebGPU renderer helpers live in [`rendererUtils.ts`](../../src/renderers/
   - **Defaults**: `layout: 'auto'`, `vertex.entryPoint: 'vsMain'`, `fragment.entryPoint: 'fsMain'`, `primitive.topology: 'triangle-list'`, `multisample.count: 1`
   - **Fragment targets convenience**: provide `fragment.formats` (one or many formats) instead of full `fragment.targets` to generate `GPUColorTargetState[]` (optionally with shared `blend` / `writeMask`).
   - **Cache behavior (important)**: when `pipelineCache` is provided and `bindGroupLayouts` are supplied, `rendererUtils` forces `layout: 'auto'` to maximize cross-chart pipeline reuse.
+- **`createComputePipeline(device, descriptor, pipelineCache?)`**: creates a `GPUComputePipeline` from a compute shader module or WGSL code (deduped via `pipelineCache` when provided). Used for GPU-accelerated operations like scatter-density binning and reduction.
 - **`createUniformBuffer(device, size, options?)`**: creates a `GPUBuffer` with usage `UNIFORM | COPY_DST`, aligning size (defaults to 16-byte alignment).
 - **`writeUniformBuffer(device, buffer, data)`**: writes `BufferSource` data at offset 0 via `device.queue.writeBuffer(...)`.
 - **Uniform packing (perf)**: several renderers reuse small scratch typed arrays for uniform packing to avoid per-frame allocations; see [`createLineRenderer.ts`](../../src/renderers/createLineRenderer.ts), [`createAreaRenderer.ts`](../../src/renderers/createAreaRenderer.ts), [`createScatterRenderer.ts`](../../src/renderers/createScatterRenderer.ts), and [`createPieRenderer.ts`](../../src/renderers/createPieRenderer.ts).
