@@ -64,14 +64,14 @@ export interface PipelineCache {
 
 const FNV1A_64_OFFSET = 0xcbf29ce484222325n;
 const FNV1A_64_PRIME = 0x100000001b3n;
-const U64_MASK = 0xffffffffffffffffn;
+const U64_MASK: bigint = 0xffffffffffffffffn;
 
 const fnv1a64Hex = (s: string): string => {
   // Deterministic hash over UTF-16 code units.
   let h = FNV1A_64_OFFSET;
   for (let i = 0; i < s.length; i++) {
     h ^= BigInt(s.charCodeAt(i));
-    h = (h * FNV1A_64_PRIME) & U64_MASK;
+    h = BigInt(h * FNV1A_64_PRIME) & U64_MASK;
   }
   return h.toString(16).padStart(16, '0');
 };
