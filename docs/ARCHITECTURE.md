@@ -49,6 +49,7 @@ flowchart TB
         Canvas --> PointerHandlers["Pointer listeners"]
         PointerHandlers --> PublicHitTest["findNearestPoint / findPieSlice - visibility filtering"]
         PointerHandlers --> EmitEvents["emit click / mouseover / mouseout"]
+        AppendData --> EmitDataAppend["emit dataAppend"]
       end
 
       DataZoomSlider["dataZoom slider - DOM overlay, reserves bottom space"] --> Coordinator
