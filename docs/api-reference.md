@@ -149,6 +149,7 @@ Supported events:
 - `'mouseout'`
 - `'crosshairMove'`
 - `'zoomRangeChange'`
+- `'dataAppend'`
 
 Example (click + crosshair sync):
 

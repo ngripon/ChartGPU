@@ -115,10 +115,12 @@ export interface ChartGPUInstance {
   on(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
   on(eventName: 'zoomRangeChange', callback: ChartGPUZoomRangeChangeCallback): void;
   on(eventName: 'deviceLost', callback: ChartGPUDeviceLostCallback): void;
+  on(eventName: 'dataAppend', callback: ChartGPUDataAppendCallback): void;
   on(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   off(eventName: 'crosshairMove', callback: ChartGPUCrosshairMoveCallback): void;
   off(eventName: 'zoomRangeChange', callback: ChartGPUZoomRangeChangeCallback): void;
   off(eventName: 'deviceLost', callback: ChartGPUDeviceLostCallback): void;
+  off(eventName: 'dataAppend', callback: ChartGPUDataAppendCallback): void;
   off(eventName: ChartGPUEventName, callback: ChartGPUEventCallback): void;
   /**
    * Gets the current “interaction x” in domain units (or `null` when inactive).
@@ -191,7 +193,7 @@ export interface ChartGPUInstance {
 // remains the creation API exported from `src/index.ts`).
 export type ChartGPU = ChartGPUInstance;
 
-export type ChartGPUEventName = 'click' | 'mouseover' | 'mouseout' | 'crosshairMove' | 'zoomRangeChange' | 'deviceLost';
+export type ChartGPUEventName = 'click' | 'mouseover' | 'mouseout' | 'crosshairMove' | 'zoomRangeChange' | 'deviceLost' | 'dataAppend';
 
 export type ChartGPUEventPayload = Readonly<{
   readonly seriesIndex: number | null;
@@ -218,6 +220,12 @@ export type ChartGPUZoomRangeChangePayload = Readonly<{
   readonly sourceKind?: ZoomChangeSourceKind;
 }>;
 
+export type ChartGPUDataAppendPayload = Readonly<{
+  readonly seriesIndex: number;
+  readonly count: number;
+  readonly xExtent: { readonly min: number; readonly max: number };
+}>;
+
 export type ChartGPUEventCallback = (payload: ChartGPUEventPayload) => void;
 
 export type ChartGPUCrosshairMoveCallback = (payload: ChartGPUCrosshairMovePayload) => void;
@@ -226,7 +234,9 @@ export type ChartGPUZoomRangeChangeCallback = (payload: ChartGPUZoomRangeChangeP
 
 export type ChartGPUDeviceLostCallback = (payload: ChartGPUDeviceLostPayload) => void;
 
-type AnyChartGPUEventCallback = ChartGPUEventCallback | ChartGPUCrosshairMoveCallback | ChartGPUZoomRangeChangeCallback | ChartGPUDeviceLostCallback;
+export type ChartGPUDataAppendCallback = (payload: ChartGPUDataAppendPayload) => void;
+
+type AnyChartGPUEventCallback = ChartGPUEventCallback | ChartGPUCrosshairMoveCallback | ChartGPUZoomRangeChangeCallback | ChartGPUDeviceLostCallback | ChartGPUDataAppendCallback;
 
 type ListenerRegistry = Readonly<Record<ChartGPUEventName, Set<AnyChartGPUEventCallback>>>;
 
@@ -338,6 +348,9 @@ const extendBoundsWithCartesianData = (bounds: Bounds | null, data: CartesianSer
   let yMax = b.yMax;
 
   // Hoist type detection outside loop to avoid per-point type checks
+  // NOTE: Format detection logic is duplicated in 2 places and must stay in sync:
+  // 1. extendBoundsWithCartesianData (here) - for bounds updates
+  // 2. appendData method - for columnar store appends (also computes xExtent inline)
   const isXYArrays = 
     typeof data === 'object' &&
     data !== null &&
@@ -764,7 +777,11 @@ export async function createChartGPU(
     crosshairMove: new Set<ChartGPUCrosshairMoveCallback>(),
     zoomRangeChange: new Set<ChartGPUZoomRangeChangeCallback>(),
     deviceLost: new Set<ChartGPUDeviceLostCallback>(),
+    dataAppend: new Set<ChartGPUDataAppendCallback>(),
   };
+
+  // AC-6: Boolean flag for zero-overhead check (faster than Set.size property access in hot path)
+  let hasDataAppendListeners = false;
 
   let tapCandidate: TapCandidate | null = null;
   let suppressNextLostPointerCaptureId: number | null = null;
@@ -984,11 +1001,12 @@ export async function createChartGPU(
     dataZoomSlider.update(resolvedOptions.theme);
   };
 
-  // Reusable event payloads to avoid allocations in hot paths (pointer/zoom interactions).
+  // Reusable event payloads to avoid allocations in hot paths (pointer/zoom/dataAppend interactions).
   // Internal mutable versions; cast to readonly when emitting (safe since payload is passed by reference
   // and consumers receive readonly types, preventing external mutation).
   const crosshairMovePayload = { x: null as number | null, source: undefined as unknown };
   const zoomRangeChangePayload = { start: 0, end: 100, source: undefined as unknown, sourceKind: undefined as ZoomChangeSourceKind | undefined };
+  const dataAppendPayload = { seriesIndex: 0, count: 0, xExtent: { min: 0, max: 0 } };
 
   const bindCoordinatorInteractionXChange = (): void => {
     unbindCoordinatorInteractionXChange();
@@ -1407,7 +1425,7 @@ export async function createChartGPU(
 
   const emit = (
     eventName: ChartGPUEventName,
-    payload: ChartGPUEventPayload | ChartGPUCrosshairMovePayload | ChartGPUZoomRangeChangePayload | ChartGPUDeviceLostPayload
+    payload: ChartGPUEventPayload | ChartGPUCrosshairMovePayload | ChartGPUZoomRangeChangePayload | ChartGPUDeviceLostPayload | ChartGPUDataAppendPayload
   ): void => {
     if (disposed) return;
     for (const cb of listeners[eventName]) (cb as (p: typeof payload) => void)(payload);
@@ -1582,6 +1600,8 @@ export async function createChartGPU(
       listeners.crosshairMove.clear();
       listeners.zoomRangeChange.clear();
       listeners.deviceLost.clear();
+      listeners.dataAppend.clear();
+      hasDataAppendListeners = false;
 
       gpuContext = null;
       canvas.remove();
@@ -1640,16 +1660,33 @@ export async function createChartGPU(
       // hit-testing runtime store in sync.
       coordinator?.appendData(seriesIndex, newPoints);
 
+      // Track xExtent during append (avoids separate iteration when listeners present)
+      let appendXMin = Number.POSITIVE_INFINITY;
+      let appendXMax = Number.NEGATIVE_INFINITY;
+
       if (s.type === 'candlestick') {
         // Handle candlestick series with OHLC data points.
         const existing = runtimeRawDataByIndex[seriesIndex];
         const owned = (Array.isArray(existing) ? existing : []) as OHLCDataPoint[];
-        owned.push(...(newPoints as OHLCDataPoint[]));
+        const ohlcPoints = newPoints as OHLCDataPoint[];
+        
+        // Track xExtent during push if listeners present
+        if (hasDataAppendListeners) {
+          for (let i = 0; i < pointCount; i++) {
+            const x = getOHLCTimestamp(ohlcPoints[i]!);
+            if (Number.isFinite(x)) {
+              if (x < appendXMin) appendXMin = x;
+              if (x > appendXMax) appendXMax = x;
+            }
+          }
+        }
+        
+        owned.push(...ohlcPoints);
         runtimeRawDataByIndex[seriesIndex] = owned;
 
         runtimeRawBoundsByIndex[seriesIndex] = extendBoundsWithOHLCDataPoints(
           runtimeRawBoundsByIndex[seriesIndex],
-          newPoints as OHLCDataPoint[]
+          ohlcPoints
         );
       } else {
         // Handle other cartesian series (line, area, bar, scatter) with columnar append.
@@ -1658,6 +1695,9 @@ export async function createChartGPU(
 
         // Hoist type detection outside loops to avoid per-point type checks
         // Check format once, then use specialized fast paths
+        // NOTE: Format detection logic is duplicated in 2 places and must stay in sync:
+        // 1. extendBoundsWithCartesianData - for bounds updates
+        // 2. appendData method (here) - for columnar store appends (also computes xExtent inline)
         const isXYArrays = 
           typeof appendData === 'object' &&
           appendData !== null &&
@@ -1679,10 +1719,17 @@ export async function createChartGPU(
           // Fast path for XYArraysData: direct array access without type checks
           const xyData = appendData as { x: ArrayLike<number>; y: ArrayLike<number>; size?: ArrayLike<number> };
           
-          // Append x, y values
+          // Append x, y values (and track xExtent if listeners present)
           for (let i = 0; i < pointCount; i++) {
-            owned.x.push(xyData.x[i]!);
+            const x = xyData.x[i]!;
+            owned.x.push(x);
             owned.y.push(xyData.y[i]!);
+            
+            // Track xExtent during iteration (avoids second O(n) pass)
+            if (hasDataAppendListeners && Number.isFinite(x)) {
+              if (x < appendXMin) appendXMin = x;
+              if (x > appendXMax) appendXMax = x;
+            }
           }
           
           // Handle size array if present
@@ -1696,20 +1743,34 @@ export async function createChartGPU(
           // Fast path for InterleavedXYData: direct typed array access
           const arr = appendData as Float32Array | Float64Array;
           
-          // Append x, y values from interleaved layout
+          // Append x, y values from interleaved layout (and track xExtent if listeners present)
           for (let i = 0; i < pointCount; i++) {
-            owned.x.push(arr[i * 2]!);
+            const x = arr[i * 2]!;
+            owned.x.push(x);
             owned.y.push(arr[i * 2 + 1]!);
+            
+            // Track xExtent during iteration
+            if (hasDataAppendListeners && Number.isFinite(x)) {
+              if (x < appendXMin) appendXMin = x;
+              if (x > appendXMax) appendXMax = x;
+            }
           }
           // InterleavedXYData doesn't support size
         } else {
           // Array<DataPoint> path: use helper functions
           for (let i = 0; i < pointCount; i++) {
-            owned.x.push(getCartesianX(appendData, i));
+            const x = getCartesianX(appendData, i);
+            owned.x.push(x);
             owned.y.push(getCartesianY(appendData, i));
             const size = getCartesianSize(appendData, i);
             sizesToAppend[i] = size;
             if (size !== undefined) hasAnySizeValue = true;
+            
+            // Track xExtent during iteration
+            if (hasDataAppendListeners && Number.isFinite(x)) {
+              if (x < appendXMin) appendXMin = x;
+              if (x > appendXMax) appendXMax = x;
+            }
           }
         }
 
@@ -1738,15 +1799,36 @@ export async function createChartGPU(
 
       // Ensure a render is scheduled (coalesced) like setOption does.
       requestRender();
+
+      // AC-6: Only emit if listeners are registered (zero-overhead when unused).
+      // xExtent was already computed during the append iteration above (no separate O(n) pass).
+      if (hasDataAppendListeners) {
+        // Normalize xExtent: return zero extent if no finite values found
+        if (!Number.isFinite(appendXMin) || !Number.isFinite(appendXMax)) {
+          appendXMin = 0;
+          appendXMax = 0;
+        }
+        
+        // Update reusable payload and emit
+        dataAppendPayload.seriesIndex = seriesIndex;
+        dataAppendPayload.count = pointCount;
+        dataAppendPayload.xExtent.min = appendXMin;
+        dataAppendPayload.xExtent.max = appendXMax;
+        emit('dataAppend', dataAppendPayload as ChartGPUDataAppendPayload);
+      }
     },
     resize,
     dispose,
     on(eventName, callback) {
       if (disposed) return;
       listeners[eventName].add(callback as AnyChartGPUEventCallback);
+      // Update hot-path flag for dataAppend event
+      if (eventName === 'dataAppend') hasDataAppendListeners = true;
     },
     off(eventName, callback) {
       listeners[eventName].delete(callback as AnyChartGPUEventCallback);
+      // Update hot-path flag for dataAppend event
+      if (eventName === 'dataAppend') hasDataAppendListeners = listeners.dataAppend.size > 0;
     },
     getInteractionX() {
       if (disposed) return null;

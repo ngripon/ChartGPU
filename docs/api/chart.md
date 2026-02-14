@@ -161,6 +161,8 @@ See [ChartGPU.ts](../../src/ChartGPU.ts) for the full interface and lifecycle be
   
   Internally, streaming appends are flushed via a unified scheduler (rAF-first with a small timeout fallback) and only do resampling work when zoom is active or a zoom change debounce matures. When `ChartGPUOptions.autoScroll === true`, this may also adjust the x-axis percent zoom window (see **Auto-scroll (streaming)** below). Pie series are not supported by streaming append. See [`ChartGPU.ts`](../../src/ChartGPU.ts) and [`createRenderCoordinator.ts`](../../src/core/createRenderCoordinator.ts).
   
+  **Event notification:** After processing completes, `appendData()` emits a `'dataAppend'` event with metadata about the appended data (`seriesIndex`, `count`, and `xExtent`). See [Event handling](interaction.md#event-handling) for details.
+  
   **Streaming append examples:**
   
   ```typescript
